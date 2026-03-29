@@ -56,8 +56,34 @@ impl AgentLoop {
         }
     }
 
+    /// Create an AgentLoop with existing conversation history (for multi-turn).
+    pub fn with_messages(
+        agent_id: AgentId,
+        llm_client: Arc<dyn LlmClient>,
+        tools: ToolRegistry,
+        messages: Vec<ChatMessage>,
+        max_iterations: usize,
+    ) -> Self {
+        Self {
+            agent_id,
+            llm_client,
+            tools,
+            messages,
+            max_iterations,
+            max_context_chars: 100_000 * BYTES_PER_TOKEN,
+            total_tokens: 0,
+            tool_calls_count: 0,
+            event_tx: None,
+        }
+    }
+
     pub fn set_event_sink(&mut self, tx: UnboundedSender<AgentEvent>) {
         self.event_tx = Some(tx);
+    }
+
+    /// Get a clone of the current conversation messages.
+    pub fn messages(&self) -> &[ChatMessage] {
+        &self.messages
     }
 
     pub async fn run(&mut self, initial_user_message: String) -> SdkResult<AgentLoopResult> {

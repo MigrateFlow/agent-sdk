@@ -5,6 +5,10 @@ edition = "2021"
 license = "MIT"
 description = "A generic multi-agent SDK with ReAct loop, task management, and LLM integration"
 
+[[bin]]
+name = "agent"
+path = "src/bin/agent.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -27,6 +31,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 
 # Logging
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # File locking
 fs2 = "0.4"
@@ -36,6 +41,11 @@ glob = "0.3"
 
 # Graph algorithms (task dependencies)
 petgraph = "0.6"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+console = "0.15"
+dotenvy = "0.15"
 
 [dev-dependencies]
 tempfile = "3"

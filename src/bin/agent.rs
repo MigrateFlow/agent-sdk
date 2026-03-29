@@ -1,0 +1,393 @@
+use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use agent_sdk::config::{LlmConfig, LlmProvider};
+use agent_sdk::tools::command_tools::RunCommandTool;
+use agent_sdk::tools::fs_tools::{ListDirectoryTool, ReadFileTool, WriteFileTool};
+use agent_sdk::tools::registry::ToolRegistry;
+use agent_sdk::tools::search_tools::SearchFilesTool;
+use agent_sdk::types::chat::ChatMessage;
+use clap::Parser;
+use console::style;
+
+#[derive(Parser)]
+#[command(name = "agent", about = "Interactive AI agent with tool access")]
+struct Cli {
+    /// LLM provider: claude or openai
+    #[arg(short, long, default_value = "claude")]
+    provider: String,
+
+    /// Model name
+    #[arg(short, long)]
+    model: Option<String>,
+
+    /// Working directory
+    #[arg(short = 'd', long, default_value = ".")]
+    dir: PathBuf,
+
+    /// Max tokens per LLM response
+    #[arg(long, default_value = "16384")]
+    max_tokens: usize,
+
+    /// Max ReAct iterations per turn
+    #[arg(long, default_value = "50")]
+    max_iterations: usize,
+
+    /// System prompt override
+    #[arg(long)]
+    system: Option<String>,
+
+    /// Allow all shell commands (no whitelist)
+    #[arg(long)]
+    allow_all_commands: bool,
+
+    /// One-shot mode: run this prompt and exit
+    prompt: Vec<String>,
+}
+
+fn build_system_prompt(work_dir: &std::path::Path) -> String {
+    format!(
+        r#"You are an expert AI coding assistant with direct access to the filesystem and shell.
+
+## Environment
+- Working directory: {work_dir}
+- You can read, write, search files, and run commands
+
+## Available Tools
+- `read_file` — Read file contents (supports offset/max_lines for large files)
+- `write_file` — Write/create files in the working directory
+- `list_directory` — List directory contents
+- `search_files` — Search by glob pattern and/or content
+- `run_command` — Execute shell commands
+
+## Guidelines
+- Read files before modifying them
+- Write complete files, no placeholders
+- After writing code, verify it compiles/works using run_command
+- Be concise in your responses
+- When asked to make changes, do them directly — don't just explain"#,
+        work_dir = work_dir.display(),
+    )
+}
+
+fn build_tools(work_dir: &PathBuf, allow_all: bool) -> ToolRegistry {
+    let mut registry = ToolRegistry::new();
+
+    registry.register(Arc::new(ReadFileTool {
+        source_root: work_dir.clone(),
+        work_dir: work_dir.clone(),
+    }));
+    registry.register(Arc::new(WriteFileTool {
+        work_dir: work_dir.clone(),
+    }));
+    registry.register(Arc::new(ListDirectoryTool {
+        source_root: work_dir.clone(),
+        work_dir: work_dir.clone(),
+    }));
+    registry.register(Arc::new(SearchFilesTool {
+        source_root: work_dir.clone(),
+    }));
+
+    if allow_all {
+        registry.register(Arc::new(RunCommandTool {
+            work_dir: work_dir.clone(),
+            allowed_commands: vec![],
+        }));
+    } else {
+        registry.register(Arc::new(RunCommandTool::with_defaults(work_dir.clone())));
+    }
+
+    registry
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("agent_sdk=warn".parse().unwrap()),
+        )
+        .with_target(false)
+        .with_writer(io::stderr)
+        .init();
+
+    let cli = Cli::parse();
+
+    let work_dir = std::fs::canonicalize(&cli.dir)?;
+
+    let provider = match cli.provider.to_lowercase().as_str() {
+        "openai" | "open_ai" => LlmProvider::OpenAi,
+        _ => LlmProvider::Claude,
+    };
+
+    let model = cli.model.unwrap_or_else(|| match provider {
+        LlmProvider::Claude => "claude-sonnet-4-20250514".to_string(),
+        LlmProvider::OpenAi => "gpt-4o".to_string(),
+    });
+
+    let llm_config = LlmConfig {
+        provider,
+        model: model.clone(),
+        max_tokens: cli.max_tokens,
+        requests_per_minute: 60,
+        tokens_per_minute: 200_000,
+        api_key: None,
+        api_base_url: None,
+    };
+
+    let llm_client = agent_sdk::llm::create_client(&llm_config)?;
+
+    let system_prompt = cli
+        .system
+        .unwrap_or_else(|| build_system_prompt(&work_dir));
+
+    eprintln!(
+        "{} {} ({})",
+        style("agent").cyan().bold(),
+        style(&model).white(),
+        style(work_dir.display()).dim(),
+    );
+    eprintln!(
+        "{}",
+        style("  Type your message, press Enter to send. Ctrl+C to exit.").dim()
+    );
+    eprintln!();
+
+    let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(&system_prompt)];
+
+    // One-shot mode
+    if !cli.prompt.is_empty() {
+        let prompt = cli.prompt.join(" ");
+        run_turn(
+            &mut messages,
+            &prompt,
+            &llm_client,
+            &work_dir,
+            cli.max_iterations,
+            cli.allow_all_commands,
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // REPL mode
+    loop {
+        eprint!("{} ", style(">").cyan().bold());
+        io::stderr().flush()?;
+
+        let input = read_input()?;
+        let input = input.trim().to_string();
+
+        if input.is_empty() {
+            continue;
+        }
+
+        match input.as_str() {
+            "/quit" | "/exit" | "/q" => break,
+            "/clear" => {
+                messages = vec![ChatMessage::system(&system_prompt)];
+                eprintln!("{}", style("  Conversation cleared.").dim());
+                continue;
+            }
+            "/help" => {
+                print_help();
+                continue;
+            }
+            _ => {}
+        }
+
+        run_turn(
+            &mut messages,
+            &input,
+            &llm_client,
+            &work_dir,
+            cli.max_iterations,
+            cli.allow_all_commands,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// Run a single conversational turn with the ReAct loop.
+async fn run_turn(
+    messages: &mut Vec<ChatMessage>,
+    user_input: &str,
+    llm_client: &Arc<dyn agent_sdk::traits::llm_client::LlmClient>,
+    work_dir: &PathBuf,
+    max_iterations: usize,
+    allow_all: bool,
+) -> anyhow::Result<()> {
+    let tools = build_tools(work_dir, allow_all);
+    let tool_defs = tools.definitions();
+
+    messages.push(ChatMessage::user(user_input));
+
+    let mut total_tokens = 0u64;
+    let mut tool_calls_count = 0usize;
+
+    for _iteration in 0..max_iterations {
+        let (response, tokens) = llm_client.chat(messages, &tool_defs).await?;
+        total_tokens += tokens;
+
+        match response {
+            ChatMessage::Assistant {
+                ref content,
+                ref tool_calls,
+            } if !tool_calls.is_empty() => {
+                // Show thinking
+                if let Some(text) = content {
+                    if !text.is_empty() {
+                        eprintln!(
+                            "  {} {}",
+                            style("thinking").dim(),
+                            style(truncate(text, 200)).dim().italic(),
+                        );
+                    }
+                }
+
+                messages.push(response);
+
+                // Execute each tool call — read from the last message we just pushed
+                let pending_calls: Vec<_> = if let Some(ChatMessage::Assistant { tool_calls, .. }) =
+                    messages.last()
+                {
+                    tool_calls.clone()
+                } else {
+                    vec![]
+                };
+
+                for tc in &pending_calls {
+                    let args_preview = truncate(&tc.function.arguments, 150);
+                    eprintln!(
+                        "  {} {} {}",
+                        style("tool").cyan().bold(),
+                        style(&tc.function.name).cyan(),
+                        style(&args_preview).dim(),
+                    );
+
+                    let args: serde_json::Value =
+                        serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+
+                    let result = tools.execute(&tc.function.name, args).await;
+
+                    let result_content = match &result {
+                        Ok(val) => {
+                            let full = serde_json::to_string(val).unwrap_or_default();
+                            truncate_tool_result(&full)
+                        }
+                        Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+                    };
+
+                    // Show abbreviated result
+                    let preview = truncate(&result_content, 120);
+                    eprintln!(
+                        "  {} {}",
+                        style("  ↳").green().dim(),
+                        style(&preview).dim(),
+                    );
+
+                    messages.push(ChatMessage::tool_result(&tc.id, &result_content));
+                    tool_calls_count += 1;
+                }
+            }
+            ChatMessage::Assistant { ref content, .. } => {
+                // Final answer
+                let answer = content.clone().unwrap_or_default();
+                messages.push(response);
+
+                println!("\n{}\n", answer);
+
+                eprintln!(
+                    "  {} tokens: {} | tool calls: {}",
+                    style("usage").dim(),
+                    style(total_tokens).dim(),
+                    style(tool_calls_count).dim(),
+                );
+                eprintln!();
+                return Ok(());
+            }
+            other => {
+                let text = other.text_content().unwrap_or("").to_string();
+                messages.push(other);
+                println!("\n{}\n", text);
+                return Ok(());
+            }
+        }
+    }
+
+    eprintln!(
+        "  {} max iterations ({}) reached",
+        style("limit").yellow().bold(),
+        max_iterations,
+    );
+    Ok(())
+}
+
+/// Read a single line of input from stdin.
+fn read_input() -> io::Result<String> {
+    let stdin = io::stdin();
+    let mut line = String::new();
+    stdin.lock().read_line(&mut line)?;
+    Ok(line)
+}
+
+fn print_help() {
+    eprintln!();
+    eprintln!("  {}", style("Commands:").bold());
+    eprintln!("    {}  — Clear conversation history", style("/clear").cyan());
+    eprintln!("    {}   — Show this help", style("/help").cyan());
+    eprintln!("    {}   — Exit", style("/quit").cyan());
+    eprintln!();
+    eprintln!("  {}", style("Usage:").bold());
+    eprintln!("    agent [OPTIONS] [PROMPT]      One-shot mode");
+    eprintln!("    agent [OPTIONS]               Interactive REPL");
+    eprintln!("    agent --allow-all-commands     Allow any shell command");
+    eprintln!("    agent -p openai -m gpt-4o     Use OpenAI");
+    eprintln!();
+}
+
+fn truncate(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len])
+    }
+}
+
+const MAX_TOOL_RESULT_CHARS: usize = 12_000;
+
+fn truncate_tool_result(s: &str) -> String {
+    if s.len() <= MAX_TOOL_RESULT_CHARS {
+        return s.to_string();
+    }
+
+    if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(s) {
+        if let Some(content) = val.get_mut("content") {
+            if let Some(text) = content.as_str() {
+                if text.len() > MAX_TOOL_RESULT_CHARS - 200 {
+                    let limit = MAX_TOOL_RESULT_CHARS - 200;
+                    let truncated = format!(
+                        "{}...\n\n[truncated: {}/{} chars]",
+                        &text[..limit],
+                        limit,
+                        text.len()
+                    );
+                    *content = serde_json::Value::String(truncated);
+                    return serde_json::to_string(&val)
+                        .unwrap_or_else(|_| s[..MAX_TOOL_RESULT_CHARS].to_string());
+                }
+            }
+        }
+    }
+
+    format!(
+        "{}...[truncated: {}/{} chars]",
+        &s[..MAX_TOOL_RESULT_CHARS],
+        MAX_TOOL_RESULT_CHARS,
+        s.len()
+    )
+}

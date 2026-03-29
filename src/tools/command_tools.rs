@@ -37,12 +37,17 @@ impl RunCommandTool {
 #[async_trait]
 impl Tool for RunCommandTool {
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "run_command".to_string(),
-            description: format!(
+        let desc = if self.allowed_commands.is_empty() {
+            "Execute any shell command in the working directory.".to_string()
+        } else {
+            format!(
                 "Execute a shell command in the working directory. Allowed commands: {}",
                 self.allowed_commands.join(", ")
-            ),
+            )
+        };
+        ToolDefinition {
+            name: "run_command".to_string(),
+            description: desc,
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -64,15 +69,18 @@ impl Tool for RunCommandTool {
 
         let timeout_secs = arguments["timeout_secs"].as_u64().unwrap_or(30);
 
-        let executable = command.split_whitespace().next().unwrap_or("");
-        if !self.allowed_commands.iter().any(|c| c == executable) {
-            return Ok(json!({
-                "error": format!(
-                    "Command '{}' is not allowed. Allowed: {}",
-                    executable,
-                    self.allowed_commands.join(", ")
-                )
-            }));
+        // Check whitelist (empty = allow all)
+        if !self.allowed_commands.is_empty() {
+            let executable = command.split_whitespace().next().unwrap_or("");
+            if !self.allowed_commands.iter().any(|c| c == executable) {
+                return Ok(json!({
+                    "error": format!(
+                        "Command '{}' is not allowed. Allowed: {}",
+                        executable,
+                        self.allowed_commands.join(", ")
+                    )
+                }));
+            }
         }
 
         let result = tokio::time::timeout(
