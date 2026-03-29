@@ -50,15 +50,45 @@ pub enum MessageTarget {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageKind {
+    // --- Task lifecycle ---
     TaskAssignment,
     TaskComplete,
     TaskFailed,
+    DependencyResolved,
+
+    // --- Plan mode ---
+    /// Teammate submits a plan for lead approval.
+    PlanSubmission,
+    /// Lead approves a teammate's plan — teammate exits plan mode.
+    PlanApproved,
+    /// Lead rejects a plan with feedback — teammate revises.
+    PlanRejected,
+
+    // --- Lead <-> Teammate ---
     QuestionForLead,
     AnswerFromLead,
-    DependencyResolved,
-    ContextShare,
+
+    // --- Teammate <-> Teammate ---
+    /// Direct message between teammates.
+    TeammateMessage,
+
+    // --- Lifecycle ---
+    /// Teammate notifies it has no more work.
+    TeammateIdle,
+    /// Lead requests teammate to shut down.
+    ShutdownRequest,
+    /// Teammate accepts shutdown.
+    ShutdownAccepted,
+    /// Teammate rejects shutdown with a reason.
+    ShutdownRejected,
+    /// Legacy: immediate shutdown (no negotiation).
     Shutdown,
+
+    // --- Context sharing ---
+    ContextShare,
 }
+
+// --- Payloads ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskCompletePayload {
@@ -77,4 +107,31 @@ pub struct TaskFailedPayload {
 pub struct ContextSharePayload {
     pub topic: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanSubmissionPayload {
+    pub task_id: TaskId,
+    pub plan: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanRejectionPayload {
+    pub task_id: TaskId,
+    pub feedback: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeammateMessagePayload {
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShutdownRejectedPayload {
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeammateIdlePayload {
+    pub tasks_completed: usize,
 }

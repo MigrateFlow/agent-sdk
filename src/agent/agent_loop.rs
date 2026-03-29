@@ -14,6 +14,7 @@ const BYTES_PER_TOKEN: usize = 4;
 const MAX_TOOL_RESULT_CHARS: usize = 12_000;
 const COMPACT_KEEP_RECENT: usize = 10;
 
+#[derive(Debug)]
 pub struct AgentLoopResult {
     pub final_content: String,
     pub messages: Vec<ChatMessage>,

@@ -11,6 +11,12 @@ pub struct TaskGraph {
     node_map: HashMap<TaskId, NodeIndex>,
 }
 
+impl Default for TaskGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TaskGraph {
     pub fn new() -> Self {
         Self {

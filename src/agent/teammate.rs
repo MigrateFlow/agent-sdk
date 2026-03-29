@@ -6,7 +6,8 @@ use tracing::{debug, error, info, warn};
 use crate::error::SdkResult;
 use crate::types::file_change::{ChangeType, FileChange};
 use crate::types::message::{
-    Envelope, MessageKind, MessageTarget, TaskCompletePayload, TaskFailedPayload,
+    Envelope, MessageKind, MessageTarget, PlanSubmissionPayload, ShutdownRejectedPayload,
+    TaskCompletePayload, TaskFailedPayload, TeammateIdlePayload,
 };
 use crate::types::task::{Task, TaskResult};
 use crate::tools::command_tools::RunCommandTool;
@@ -20,6 +21,7 @@ use super::agent_loop::AgentLoop;
 use super::context::AgentContext;
 use super::events::AgentEvent;
 use super::handle::AgentResult;
+use super::hooks::{HookEvent, HookResult};
 
 pub struct Teammate {
     ctx: AgentContext,
@@ -73,7 +75,8 @@ impl Teammate {
 
     pub async fn run(self) -> AgentResult {
         let agent_id = self.ctx.agent_id;
-        info!(agent_id = %agent_id, "Teammate started");
+        let name = self.ctx.name.clone();
+        info!(agent_id = %agent_id, name = %name, "Teammate started");
 
         let mut tasks_completed = 0;
         let mut tasks_failed = 0;
@@ -87,6 +90,7 @@ impl Teammate {
                 error!(agent_id = %agent_id, error = %e, "Failed to open mailbox");
                 return AgentResult {
                     agent_id,
+                    name,
                     tasks_completed,
                     tasks_failed,
                     total_tokens_used: total_tokens,
@@ -95,21 +99,86 @@ impl Teammate {
         };
 
         loop {
+            // --- Check mailbox for messages ---
             if let Ok(messages) = mailbox.recv() {
                 for msg in &messages {
-                    if msg.kind == MessageKind::Shutdown {
-                        info!(agent_id = %agent_id, "Received shutdown signal");
-                        self.emit(AgentEvent::AgentShutdown { agent_id });
-                        return AgentResult {
-                            agent_id,
-                            tasks_completed,
-                            tasks_failed,
-                            total_tokens_used: total_tokens,
-                        };
+                    match msg.kind {
+                        MessageKind::Shutdown => {
+                            info!(agent_id = %agent_id, "Received shutdown (immediate)");
+                            self.emit(AgentEvent::AgentShutdown { agent_id });
+                            return AgentResult {
+                                agent_id,
+                                name,
+                                tasks_completed,
+                                tasks_failed,
+                                total_tokens_used: total_tokens,
+                            };
+                        }
+                        MessageKind::ShutdownRequest => {
+                            // Shutdown negotiation: accept if idle, reject if working
+                            let has_work = self.ctx.task_store
+                                .completed_task_ids()
+                                .map(|ids| {
+                                    self.ctx.task_store.try_claim_next(agent_id, &ids).ok().flatten().is_some()
+                                })
+                                .unwrap_or(false);
+
+                            if has_work {
+                                info!(agent_id = %agent_id, "Rejecting shutdown: still have work");
+                                let reply = Envelope::new(
+                                    agent_id,
+                                    MessageTarget::TeamLead,
+                                    MessageKind::ShutdownRejected,
+                                )
+                                .with_payload(
+                                    serde_json::to_value(ShutdownRejectedPayload {
+                                        reason: "Still processing tasks".to_string(),
+                                    })
+                                    .unwrap_or_default(),
+                                )
+                                .in_reply_to(msg.id);
+                                let _ = self.ctx.broker.route(&reply);
+                                self.emit(AgentEvent::ShutdownRejected {
+                                    agent_id,
+                                    reason: "Still processing tasks".to_string(),
+                                });
+                            } else {
+                                info!(agent_id = %agent_id, "Accepting shutdown");
+                                let reply = Envelope::new(
+                                    agent_id,
+                                    MessageTarget::TeamLead,
+                                    MessageKind::ShutdownAccepted,
+                                )
+                                .in_reply_to(msg.id);
+                                let _ = self.ctx.broker.route(&reply);
+                                self.emit(AgentEvent::ShutdownAccepted { agent_id });
+                                self.emit(AgentEvent::AgentShutdown { agent_id });
+                                return AgentResult {
+                                    agent_id,
+                                    name,
+                                    tasks_completed,
+                                    tasks_failed,
+                                    total_tokens_used: total_tokens,
+                                };
+                            }
+                        }
+                        MessageKind::PlanApproved => {
+                            debug!(agent_id = %agent_id, "Plan approved by lead");
+                            // Plan approval is handled inside process_task
+                        }
+                        MessageKind::PlanRejected => {
+                            debug!(agent_id = %agent_id, "Plan rejected by lead");
+                        }
+                        MessageKind::TeammateMessage => {
+                            // Teammate-to-teammate messages can be read from context
+                            debug!(agent_id = %agent_id, from = %msg.from, "Received teammate message");
+                        }
+                        _ => {}
                     }
                 }
             }
 
+            // --- Try to claim and process a task ---
             let completed_ids = match self.ctx.task_store.completed_task_ids() {
                 Ok(ids) => ids,
                 Err(e) => {
@@ -140,6 +209,30 @@ impl Teammate {
 
                             let tool_calls = result.tool_calls_count;
                             let iterations = result.conversation_log.len() / 2;
+
+                            // Run TaskCompleted hook
+                            let hook_result = self.ctx.hooks.evaluate(&HookEvent::TaskCompleted {
+                                task: task.clone(),
+                                agent_id,
+                            });
+
+                            if let HookResult::Reject { feedback } = hook_result {
+                                warn!(task_id = %task_id, "TaskCompleted hook rejected: {}", feedback);
+                                self.emit(AgentEvent::HookRejected {
+                                    event_name: "TaskCompleted".to_string(),
+                                    feedback: feedback.clone(),
+                                });
+                                // Hook rejected completion — mark as failed so it retries
+                                if let Err(e) = self.ctx.task_store.fail_task(
+                                    task_id,
+                                    agent_id,
+                                    format!("Hook rejected: {}", feedback),
+                                ) {
+                                    error!(error = %e, "Failed to mark task as failed after hook rejection");
+                                }
+                                tasks_failed += 1;
+                                continue;
+                            }
 
                             if let Err(e) =
                                 self.ctx
@@ -218,6 +311,43 @@ impl Teammate {
                 }
                 Ok(None) => {
                     idle_cycles += 1;
+
+                    // Notify lead when going idle (first time)
+                    if idle_cycles == 1 {
+                        // Run TeammateIdle hook
+                        let hook_result = self.ctx.hooks.evaluate(&HookEvent::TeammateIdle {
+                            agent_id,
+                            name: self.ctx.name.clone(),
+                            tasks_completed,
+                        });
+
+                        if let HookResult::Reject { feedback } = hook_result {
+                            debug!(agent_id = %agent_id, "TeammateIdle hook: keep working - {}", feedback);
+                            self.emit(AgentEvent::HookRejected {
+                                event_name: "TeammateIdle".to_string(),
+                                feedback,
+                            });
+                            idle_cycles = 0; // reset to keep trying
+                            continue;
+                        }
+
+                        self.emit(AgentEvent::TeammateIdle {
+                            agent_id,
+                            tasks_completed,
+                        });
+
+                        let envelope = Envelope::new(
+                            agent_id,
+                            MessageTarget::TeamLead,
+                            MessageKind::TeammateIdle,
+                        )
+                        .with_payload(
+                            serde_json::to_value(TeammateIdlePayload { tasks_completed })
+                                .unwrap_or_default(),
+                        );
+                        let _ = self.ctx.broker.route(&envelope);
+                    }
+
                     if idle_cycles >= max_idle_cycles {
                         debug!(agent_id = %agent_id, "No more tasks, exiting");
                         break;
@@ -235,6 +365,7 @@ impl Teammate {
         self.emit(AgentEvent::AgentShutdown { agent_id });
         AgentResult {
             agent_id,
+            name,
             tasks_completed,
             tasks_failed,
             total_tokens_used: total_tokens,
@@ -251,6 +382,36 @@ impl Teammate {
         );
         let user_message = self.ctx.prompt_builder.build_user_message(task);
 
+        // --- Plan mode: if required, first generate a plan, wait for approval ---
+        if self.ctx.require_plan_approval {
+            let plan = self.generate_plan(task, &system_prompt).await?;
+
+            self.emit(AgentEvent::PlanSubmitted {
+                agent_id: self.ctx.agent_id,
+                task_id: task.id,
+                plan_preview: truncate(&plan, 200),
+            });
+
+            // Send plan to lead for approval
+            let envelope = Envelope::new(
+                self.ctx.agent_id,
+                MessageTarget::TeamLead,
+                MessageKind::PlanSubmission,
+            )
+            .with_payload(
+                serde_json::to_value(PlanSubmissionPayload {
+                    task_id: task.id,
+                    plan: plan.clone(),
+                })
+                .unwrap_or_default(),
+            );
+            self.ctx.broker.route(&envelope)?;
+
+            // Wait for approval or rejection
+            self.wait_for_plan_decision(task).await?;
+        }
+
+        // --- Execute the task ---
         let mut agent_loop = AgentLoop::new(
             self.ctx.agent_id,
             self.ctx.llm_client.clone(),
@@ -277,6 +438,75 @@ impl Teammate {
         };
 
         Ok((result, loop_result.total_tokens))
+    }
+
+    /// Generate a read-only plan for a task (plan mode).
+    async fn generate_plan(&self, task: &Task, system_prompt: &str) -> SdkResult<String> {
+        let plan_prompt = format!(
+            "{}\n\n## PLAN MODE\n\
+            You are in plan mode. Do NOT make any changes yet.\n\
+            Analyze the task and produce a detailed implementation plan:\n\
+            1. What files need to be read/created/modified\n\
+            2. The approach and key decisions\n\
+            3. Potential risks or edge cases\n\
+            4. Verification steps\n\n\
+            Task: {}\n{}",
+            system_prompt, task.title, task.description
+        );
+
+        let (plan, _tokens) = self.ctx.llm_client.ask(&plan_prompt, &task.description).await?;
+        Ok(plan)
+    }
+
+    /// Wait for the lead to approve or reject the plan.
+    async fn wait_for_plan_decision(&self, task: &Task) -> SdkResult<()> {
+        let agent_id = self.ctx.agent_id;
+        let mut mailbox = self.ctx.broker.agent_mailbox(agent_id)?;
+        let max_wait = 300; // 5 min max wait
+
+        for _ in 0..max_wait {
+            if let Ok(messages) = mailbox.recv() {
+                for msg in messages {
+                    match msg.kind {
+                        MessageKind::PlanApproved => {
+                            info!(agent_id = %agent_id, task_id = %task.id, "Plan approved");
+                            self.emit(AgentEvent::PlanApproved {
+                                agent_id,
+                                task_id: task.id,
+                            });
+                            return Ok(());
+                        }
+                        MessageKind::PlanRejected => {
+                            let feedback = msg.payload["feedback"]
+                                .as_str()
+                                .unwrap_or("No feedback")
+                                .to_string();
+                            info!(agent_id = %agent_id, task_id = %task.id, "Plan rejected: {}", feedback);
+                            self.emit(AgentEvent::PlanRejected {
+                                agent_id,
+                                task_id: task.id,
+                                feedback,
+                            });
+                            // On rejection, generate a new plan (recursive retry)
+                            // For now, just proceed with implementation
+                            return Ok(());
+                        }
+                        MessageKind::Shutdown | MessageKind::ShutdownRequest => {
+                            return Err(crate::error::SdkError::AgentCrashed {
+                                agent_id,
+                                reason: "Shutdown while waiting for plan approval".to_string(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
+        // Timeout: proceed anyway
+        warn!(agent_id = %agent_id, "Plan approval timed out, proceeding");
+        Ok(())
     }
 
     fn collect_written_files(
@@ -316,5 +546,13 @@ impl Teammate {
         if let Some(ref tx) = self.ctx.event_tx {
             let _ = tx.send(event);
         }
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max])
     }
 }

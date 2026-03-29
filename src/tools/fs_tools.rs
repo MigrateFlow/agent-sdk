@@ -200,7 +200,7 @@ impl Tool for ListDirectoryTool {
         })? {
             let name = entry.file_name().to_string_lossy().to_string();
             let ft = entry.file_type().await.ok();
-            let kind = if ft.as_ref().map_or(false, |f| f.is_dir()) { "directory" } else { "file" };
+            let kind = if ft.as_ref().is_some_and(|f| f.is_dir()) { "directory" } else { "file" };
             entries.push(json!({ "name": name, "type": kind }));
         }
 

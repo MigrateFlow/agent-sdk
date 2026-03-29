@@ -7,7 +7,9 @@ use agent_sdk::tools::command_tools::RunCommandTool;
 use agent_sdk::tools::fs_tools::{ListDirectoryTool, ReadFileTool, WriteFileTool};
 use agent_sdk::tools::registry::ToolRegistry;
 use agent_sdk::tools::search_tools::SearchFilesTool;
+use agent_sdk::tools::team_tools::SpawnAgentTeamTool;
 use agent_sdk::types::chat::ChatMessage;
+use agent_sdk::AgentEvent;
 use clap::Parser;
 use console::style;
 
@@ -60,6 +62,20 @@ fn build_system_prompt(work_dir: &std::path::Path) -> String {
 - `list_directory` — List directory contents
 - `search_files` — Search by glob pattern and/or content
 - `run_command` — Execute shell commands
+- `spawn_agent_team` — Spawn a team of parallel agents for complex tasks
+
+## Agent Teams
+When a task is complex and has independent parts that benefit from parallel work,
+use `spawn_agent_team` to create a team. Define teammates (with names and roles)
+and tasks (with descriptions and dependencies). The team works in parallel and
+reports back when done.
+
+Good candidates for agent teams:
+- Building multiple independent modules
+- Reviewing code from different angles (security, performance, tests)
+- Investigating a bug with competing hypotheses
+
+Do NOT use agent teams for simple tasks — handle those yourself directly.
 
 ## Guidelines
 - Read files before modifying them
@@ -71,7 +87,12 @@ fn build_system_prompt(work_dir: &std::path::Path) -> String {
     )
 }
 
-fn build_tools(work_dir: &PathBuf, allow_all: bool) -> ToolRegistry {
+fn build_tools(
+    work_dir: &PathBuf,
+    allow_all: bool,
+    llm_client: Arc<dyn agent_sdk::traits::llm_client::LlmClient>,
+    event_tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
+) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
 
     registry.register(Arc::new(ReadFileTool {
@@ -98,6 +119,14 @@ fn build_tools(work_dir: &PathBuf, allow_all: bool) -> ToolRegistry {
         registry.register(Arc::new(RunCommandTool::with_defaults(work_dir.clone())));
     }
 
+    // Agent team tool — lets the LLM decide when to spawn a team
+    registry.register(Arc::new(SpawnAgentTeamTool {
+        work_dir: work_dir.clone(),
+        source_root: work_dir.clone(),
+        llm_client,
+        event_tx,
+    }));
+
     registry
 }
 
@@ -117,7 +146,7 @@ async fn main() -> anyhow::Result<()> {
 
     let work_dir = std::fs::canonicalize(&cli.dir)?;
 
-    // Auto-detect provider: CLI flag > LLM_PROVIDER env > detect from available API keys
+    // Auto-detect provider
     let provider = if let Some(ref p) = cli.provider {
         match p.to_lowercase().as_str() {
             "openai" | "open_ai" => LlmProvider::OpenAi,
@@ -137,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
         LlmProvider::Claude
     };
 
-    // Auto-detect model: CLI flag > provider-specific env > LLM_MODEL env > default
+    // Auto-detect model
     let model = cli.model.unwrap_or_else(|| {
         let provider_env = match provider {
             LlmProvider::Claude => "ANTHROPIC_MODEL",
@@ -157,11 +186,86 @@ async fn main() -> anyhow::Result<()> {
         max_tokens: cli.max_tokens,
         requests_per_minute: 60,
         tokens_per_minute: 200_000,
-        api_key: None,       // resolved from env by LlmConfig
-        api_base_url: None,  // resolved from env by LlmConfig
+        api_key: None,
+        api_base_url: None,
     };
 
     let llm_client = agent_sdk::llm::create_client(&llm_config)?;
+
+    // Event channel for team monitoring
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+
+    // Spawn event printer in background
+    tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                AgentEvent::TeamSpawned { teammate_count } => {
+                    eprintln!(
+                        "  {} spawned {} teammates",
+                        style("team").magenta().bold(),
+                        style(teammate_count).white(),
+                    );
+                }
+                AgentEvent::TeammateSpawned { name, .. } => {
+                    eprintln!(
+                        "  {} + {}",
+                        style("team").magenta().bold(),
+                        style(&name).magenta(),
+                    );
+                }
+                AgentEvent::TaskStarted { title, .. } => {
+                    eprintln!(
+                        "  {} {}",
+                        style("task").blue().bold(),
+                        style(&title).blue(),
+                    );
+                }
+                AgentEvent::TaskCompleted {
+                    tokens_used,
+                    tool_calls,
+                    ..
+                } => {
+                    eprintln!(
+                        "  {} {} tokens, {} tool calls",
+                        style("  done").green().dim(),
+                        style(tokens_used).dim(),
+                        style(tool_calls).dim(),
+                    );
+                }
+                AgentEvent::TaskFailed { error, .. } => {
+                    eprintln!(
+                        "  {} {}",
+                        style("  fail").red().bold(),
+                        style(&error).red().dim(),
+                    );
+                }
+                AgentEvent::PlanSubmitted { plan_preview, .. } => {
+                    eprintln!(
+                        "  {} {}",
+                        style("plan").yellow().bold(),
+                        style(&plan_preview).dim(),
+                    );
+                }
+                AgentEvent::PlanApproved { .. } => {
+                    eprintln!("  {} approved", style("plan").yellow().bold());
+                }
+                AgentEvent::PlanRejected { feedback, .. } => {
+                    eprintln!(
+                        "  {} rejected: {}",
+                        style("plan").yellow().bold(),
+                        style(&feedback).dim(),
+                    );
+                }
+                AgentEvent::TeammateIdle { .. } => {
+                    eprintln!("  {} teammate idle", style("team").magenta().dim());
+                }
+                AgentEvent::ShutdownRequested { .. } => {
+                    eprintln!("  {} shutting down", style("team").magenta().dim());
+                }
+                _ => {}
+            }
+        }
+    });
 
     let system_prompt = cli
         .system
@@ -191,6 +295,7 @@ async fn main() -> anyhow::Result<()> {
             &work_dir,
             cli.max_iterations,
             cli.allow_all_commands,
+            Some(event_tx),
         )
         .await?;
         return Ok(());
@@ -229,6 +334,7 @@ async fn main() -> anyhow::Result<()> {
             &work_dir,
             cli.max_iterations,
             cli.allow_all_commands,
+            Some(event_tx.clone()),
         )
         .await?;
     }
@@ -244,8 +350,9 @@ async fn run_turn(
     work_dir: &PathBuf,
     max_iterations: usize,
     allow_all: bool,
+    event_tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
 ) -> anyhow::Result<()> {
-    let tools = build_tools(work_dir, allow_all);
+    let tools = build_tools(work_dir, allow_all, llm_client.clone(), event_tx);
     let tool_defs = tools.definitions();
 
     messages.push(ChatMessage::user(user_input));
@@ -275,7 +382,7 @@ async fn run_turn(
 
                 messages.push(response);
 
-                // Execute each tool call — read from the last message we just pushed
+                // Execute each tool call
                 let pending_calls: Vec<_> = if let Some(ChatMessage::Assistant { tool_calls, .. }) =
                     messages.last()
                 {
@@ -285,13 +392,23 @@ async fn run_turn(
                 };
 
                 for tc in &pending_calls {
+                    let is_team = tc.function.name == "spawn_agent_team";
                     let args_preview = truncate(&tc.function.arguments, 150);
-                    eprintln!(
-                        "  {} {} {}",
-                        style("tool").cyan().bold(),
-                        style(&tc.function.name).cyan(),
-                        style(&args_preview).dim(),
-                    );
+
+                    if is_team {
+                        eprintln!(
+                            "  {} {}",
+                            style("team").magenta().bold(),
+                            style("Spawning agent team...").magenta(),
+                        );
+                    } else {
+                        eprintln!(
+                            "  {} {} {}",
+                            style("tool").cyan().bold(),
+                            style(&tc.function.name).cyan(),
+                            style(&args_preview).dim(),
+                        );
+                    }
 
                     let args: serde_json::Value =
                         serde_json::from_str(&tc.function.arguments).unwrap_or_default();
@@ -308,11 +425,19 @@ async fn run_turn(
 
                     // Show abbreviated result
                     let preview = truncate(&result_content, 120);
-                    eprintln!(
-                        "  {} {}",
-                        style("  ↳").green().dim(),
-                        style(&preview).dim(),
-                    );
+                    if is_team {
+                        eprintln!(
+                            "  {} {}",
+                            style("team").magenta().bold(),
+                            style(&preview).dim(),
+                        );
+                    } else {
+                        eprintln!(
+                            "  {} {}",
+                            style("  ↳").green().dim(),
+                            style(&preview).dim(),
+                        );
+                    }
 
                     messages.push(ChatMessage::tool_result(&tc.id, &result_content));
                     tool_calls_count += 1;
@@ -351,7 +476,6 @@ async fn run_turn(
     Ok(())
 }
 
-/// Read a single line of input from stdin.
 fn read_input() -> io::Result<String> {
     let stdin = io::stdin();
     let mut line = String::new();
@@ -371,6 +495,11 @@ fn print_help() {
     eprintln!("    agent [OPTIONS]               Interactive REPL");
     eprintln!("    agent --allow-all-commands     Allow any shell command");
     eprintln!("    agent -p openai -m gpt-4o     Use OpenAI");
+    eprintln!();
+    eprintln!("  {}", style("Agent Teams:").bold());
+    eprintln!("    The agent automatically decides when to spawn a team.");
+    eprintln!("    Ask it to work on complex tasks with parallel components");
+    eprintln!("    and it will create teammates on its own.");
     eprintln!();
 }
 

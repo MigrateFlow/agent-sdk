@@ -1,0 +1,201 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use serde::Deserialize;
+use serde_json::json;
+use uuid::Uuid;
+
+use crate::agent::events::AgentEvent;
+use crate::agent::hooks::HookRegistry;
+use crate::agent::memory::MemoryStore;
+use crate::agent::team_lead::{TeamLead, TeammateSpec};
+use crate::config::AgentConfig;
+use crate::error::{SdkError, SdkResult};
+use crate::mailbox::broker::MessageBroker;
+use crate::task::store::TaskStore;
+use crate::traits::llm_client::LlmClient;
+use crate::traits::prompt_builder::DefaultPromptBuilder;
+use crate::traits::tool::{Tool, ToolDefinition};
+use crate::types::task::Task;
+
+/// Tool that lets the agent spawn an agent team at runtime.
+/// The LLM decides when a task is complex enough to warrant a team.
+pub struct SpawnAgentTeamTool {
+    pub work_dir: PathBuf,
+    pub source_root: PathBuf,
+    pub llm_client: Arc<dyn LlmClient>,
+    pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamRequest {
+    teammates: Vec<TeammateRequest>,
+    tasks: Vec<TaskRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeammateRequest {
+    name: String,
+    role: String,
+    #[serde(default)]
+    require_plan_approval: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskRequest {
+    title: String,
+    description: String,
+    target_file: String,
+    #[serde(default)]
+    depends_on: Vec<usize>,
+    #[serde(default)]
+    priority: u32,
+}
+
+#[async_trait]
+impl Tool for SpawnAgentTeamTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "spawn_agent_team".to_string(),
+            description: "Spawn a team of parallel agents to work on complex tasks. \
+                Use this when the work can be split into independent pieces that benefit \
+                from parallel execution. Each teammate works independently with its own context. \
+                Do NOT use this for simple, sequential tasks — handle those yourself."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "teammates": {
+                        "type": "array",
+                        "description": "The teammates to spawn",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string", "description": "Short name for the teammate (e.g. 'backend-dev', 'reviewer')" },
+                                "role": { "type": "string", "description": "Description of what this teammate should do" },
+                                "require_plan_approval": { "type": "boolean", "description": "If true, teammate must submit a plan before implementing" }
+                            },
+                            "required": ["name", "role"]
+                        }
+                    },
+                    "tasks": {
+                        "type": "array",
+                        "description": "Tasks for the team to work on",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": { "type": "string", "description": "Short task title" },
+                                "description": { "type": "string", "description": "Detailed instructions for the agent" },
+                                "target_file": { "type": "string", "description": "Output file path" },
+                                "depends_on": { "type": "array", "items": { "type": "integer" }, "description": "Indices (0-based) of tasks this depends on" },
+                                "priority": { "type": "integer", "description": "Priority (lower = higher priority)" }
+                            },
+                            "required": ["title", "description", "target_file"]
+                        }
+                    }
+                },
+                "required": ["teammates", "tasks"]
+            }),
+        }
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> SdkResult<serde_json::Value> {
+        let request: TeamRequest =
+            serde_json::from_value(arguments).map_err(|e| SdkError::ToolExecution {
+                tool_name: "spawn_agent_team".to_string(),
+                message: format!("Invalid arguments: {}", e),
+            })?;
+
+        if request.teammates.is_empty() {
+            return Ok(json!({ "error": "Must specify at least one teammate" }));
+        }
+        if request.tasks.is_empty() {
+            return Ok(json!({ "error": "Must specify at least one task" }));
+        }
+
+        // Set up team infrastructure in a hidden subdirectory,
+        // but teammates write output to the actual work_dir.
+        let infra_dir = self.work_dir.join(".agent-team");
+        tokio::fs::create_dir_all(&infra_dir).await.map_err(SdkError::Io)?;
+
+        let task_store = Arc::new(TaskStore::new(infra_dir.clone()));
+        task_store.init()?;
+
+        let broker = Arc::new(MessageBroker::new(infra_dir.join("mailbox"))?);
+        let memory = Arc::new(MemoryStore::new(infra_dir.join("memory"))?);
+
+        // Create tasks, resolving dependency indices to TaskIds
+        let mut created_tasks: Vec<Task> = Vec::new();
+        for (i, tr) in request.tasks.iter().enumerate() {
+            let deps: Vec<_> = tr
+                .depends_on
+                .iter()
+                .filter_map(|&idx| created_tasks.get(idx).map(|t| t.id))
+                .collect();
+
+            let task = Task::new(&tr.title, &tr.title, &tr.description, &tr.target_file)
+                .with_priority(tr.priority.max(i as u32))
+                .with_dependencies(deps);
+
+            task_store.create_task(&task)?;
+            created_tasks.push(task);
+        }
+
+        // Create teammate specs
+        let teammate_specs: Vec<TeammateSpec> = request
+            .teammates
+            .iter()
+            .map(|t| TeammateSpec {
+                name: t.name.clone(),
+                prompt: t.role.clone(),
+                require_plan_approval: t.require_plan_approval,
+            })
+            .collect();
+
+        let teammate_names: Vec<_> = teammate_specs.iter().map(|t| t.name.clone()).collect();
+        let task_titles: Vec<_> = created_tasks.iter().map(|t| t.title.clone()).collect();
+        let task_count = created_tasks.len();
+        let teammate_count = teammate_specs.len();
+
+        // Run the team lead
+        let lead = TeamLead {
+            id: Uuid::new_v4(),
+            task_store,
+            broker,
+            llm_client: self.llm_client.clone(),
+            prompt_builder: Arc::new(DefaultPromptBuilder),
+            config: AgentConfig {
+                max_parallel_agents: teammate_count,
+                max_loop_iterations: 30,
+                max_task_retries: 2,
+                ..Default::default()
+            },
+            source_root: self.source_root.clone(),
+            work_dir: self.work_dir.clone(),
+            memory_store: memory,
+            event_tx: self.event_tx.clone(),
+            hooks: Arc::new(HookRegistry::new()),
+            teammate_specs,
+        };
+
+        match lead.run().await {
+            Ok(summary) => Ok(json!({
+                "status": "completed",
+                "teammates": teammate_names,
+                "tasks": task_titles,
+                "total_tasks": summary.total_tasks,
+                "tasks_completed": summary.tasks_completed,
+                "tasks_failed": summary.tasks_failed,
+                "agents_spawned": summary.agents_spawned,
+                "total_tokens_used": summary.total_tokens_used
+            })),
+            Err(e) => Ok(json!({
+                "status": "failed",
+                "error": e.to_string(),
+                "teammates": teammate_names,
+                "tasks_created": task_count
+            })),
+        }
+    }
+}

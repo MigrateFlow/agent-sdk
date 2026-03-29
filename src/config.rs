@@ -1,16 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LlmProvider {
+    #[default]
     Claude,
     OpenAi,
-}
-
-impl Default for LlmProvider {
-    fn default() -> Self {
-        Self::Claude
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

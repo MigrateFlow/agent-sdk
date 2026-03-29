@@ -10,7 +10,8 @@ use crate::error::{AgentId, SdkResult};
 use crate::traits::llm_client::LlmClient;
 use crate::traits::prompt_builder::PromptBuilder;
 use crate::types::message::{
-    Envelope, MessageKind, MessageTarget, TaskCompletePayload, TaskFailedPayload,
+    Envelope, MessageKind, MessageTarget, PlanSubmissionPayload, TaskCompletePayload,
+    TaskFailedPayload, TeammateIdlePayload,
 };
 use crate::mailbox::broker::MessageBroker;
 use crate::task::store::TaskStore;
@@ -18,9 +19,18 @@ use crate::task::store::TaskStore;
 use super::context::AgentContext;
 use super::events::AgentEvent;
 use super::handle::AgentHandle;
+use super::hooks::HookRegistry;
 use super::memory::MemoryStore;
 use super::registry::AgentRegistry;
 use super::teammate::Teammate;
+
+/// Specification for a teammate to be spawned.
+#[derive(Debug, Clone)]
+pub struct TeammateSpec {
+    pub name: String,
+    pub prompt: String,
+    pub require_plan_approval: bool,
+}
 
 pub struct TeamLead {
     pub id: AgentId,
@@ -33,6 +43,10 @@ pub struct TeamLead {
     pub work_dir: std::path::PathBuf,
     pub memory_store: Arc<MemoryStore>,
     pub event_tx: Option<UnboundedSender<AgentEvent>>,
+    pub hooks: Arc<HookRegistry>,
+    /// Named teammates to spawn. If empty, generic teammates are spawned
+    /// up to `config.max_parallel_agents`.
+    pub teammate_specs: Vec<TeammateSpec>,
 }
 
 #[derive(Debug)]
@@ -54,21 +68,49 @@ impl TeamLead {
 
         let mut lead_mailbox = self.broker.team_lead_mailbox()?;
 
-        let initial_count = self.config.max_parallel_agents;
-        for _ in 0..initial_count {
-            match self.spawn_teammate().await {
-                Ok(handle) => {
-                    registry.register(handle);
-                    agents_spawned += 1;
+        // Spawn teammates: use explicit specs if provided, otherwise generic
+        if !self.teammate_specs.is_empty() {
+            for spec in &self.teammate_specs {
+                match self.spawn_named_teammate(spec).await {
+                    Ok(handle) => {
+                        self.emit(AgentEvent::TeammateSpawned {
+                            agent_id: handle.agent_id,
+                            name: handle.name.clone(),
+                        });
+                        registry.register(handle);
+                        agents_spawned += 1;
+                    }
+                    Err(e) => {
+                        error!(name = %spec.name, error = %e, "Failed to spawn teammate");
+                    }
                 }
-                Err(e) => {
-                    error!(error = %e, "Failed to spawn teammate");
+            }
+        } else {
+            let initial_count = self.config.max_parallel_agents;
+            for i in 0..initial_count {
+                let name = format!("teammate-{}", i + 1);
+                match self.spawn_teammate(&name, false).await {
+                    Ok(handle) => {
+                        self.emit(AgentEvent::TeammateSpawned {
+                            agent_id: handle.agent_id,
+                            name: handle.name.clone(),
+                        });
+                        registry.register(handle);
+                        agents_spawned += 1;
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to spawn teammate");
+                    }
                 }
             }
         }
 
+        self.emit(AgentEvent::TeamSpawned {
+            teammate_count: agents_spawned,
+        });
         info!(count = agents_spawned, "Teammates spawned");
 
+        // --- Main orchestration loop ---
         loop {
             let summary = self.task_store.summary()?;
 
@@ -82,10 +124,11 @@ impl TeamLead {
             );
 
             if summary.is_done() {
-                info!("All tasks processed, shutting down agents");
+                info!("All tasks processed, shutting down team");
                 break;
             }
 
+            // Process messages from teammates
             if let Ok(messages) = lead_mailbox.recv() {
                 for msg in messages {
                     match msg.kind {
@@ -108,6 +151,26 @@ impl TeamLead {
                                 );
                             }
                         }
+                        MessageKind::PlanSubmission => {
+                            self.handle_plan_submission(&msg).await;
+                        }
+                        MessageKind::TeammateIdle => {
+                            if let Ok(payload) =
+                                serde_json::from_value::<TeammateIdlePayload>(msg.payload.clone())
+                            {
+                                debug!(
+                                    from = %msg.from,
+                                    tasks_completed = payload.tasks_completed,
+                                    "Teammate idle"
+                                );
+                            }
+                        }
+                        MessageKind::ShutdownRejected => {
+                            debug!(from = %msg.from, "Teammate rejected shutdown");
+                        }
+                        MessageKind::ShutdownAccepted => {
+                            debug!(from = %msg.from, "Teammate accepted shutdown");
+                        }
                         MessageKind::QuestionForLead => {
                             debug!(from = %msg.from, "Question from teammate (auto-responding)");
                             let reply = Envelope::new(
@@ -123,23 +186,36 @@ impl TeamLead {
                 }
             }
 
+            // Collect results from finished agents
             let results = registry.collect_finished().await;
             for result in results {
                 match result {
                     Ok(agent_result) => {
                         total_tokens += agent_result.total_tokens_used;
+                        info!(
+                            agent = %agent_result.name,
+                            tasks = agent_result.tasks_completed,
+                            "Teammate finished"
+                        );
                     }
                     Err((crashed_id, reason)) => {
-                        warn!(agent_id = %crashed_id, reason = %reason, "Agent crashed");
+                        warn!(agent_id = %crashed_id, reason = %reason, "Teammate crashed");
                     }
                 }
             }
 
-            if registry.active_count() < self.config.max_parallel_agents
+            // Spawn replacement teammates if needed (only for generic mode)
+            if self.teammate_specs.is_empty()
+                && registry.active_count() < self.config.max_parallel_agents
                 && (summary.pending > 0)
             {
-                match self.spawn_teammate().await {
+                let name = format!("teammate-{}", agents_spawned + 1);
+                match self.spawn_teammate(&name, false).await {
                     Ok(handle) => {
+                        self.emit(AgentEvent::TeammateSpawned {
+                            agent_id: handle.agent_id,
+                            name: handle.name.clone(),
+                        });
                         registry.register(handle);
                         agents_spawned += 1;
                         info!("Spawned replacement teammate");
@@ -153,11 +229,18 @@ impl TeamLead {
             tokio::time::sleep(Duration::from_millis(self.config.poll_interval_ms)).await;
         }
 
+        // --- Graceful shutdown ---
         let agent_ids = self.broker.registered_agents()?;
         for agent_id in &agent_ids {
-            let shutdown =
-                Envelope::new(self.id, MessageTarget::Agent(*agent_id), MessageKind::Shutdown);
+            let shutdown = Envelope::new(
+                self.id,
+                MessageTarget::Agent(*agent_id),
+                MessageKind::ShutdownRequest,
+            );
             let _ = self.broker.route(&shutdown);
+            self.emit(AgentEvent::ShutdownRequested {
+                agent_id: *agent_id,
+            });
         }
 
         let final_results = registry.wait_all().await;
@@ -178,13 +261,80 @@ impl TeamLead {
         })
     }
 
-    async fn spawn_teammate(&self) -> SdkResult<AgentHandle> {
-        let agent_id = Uuid::new_v4();
+    async fn handle_plan_submission(&self, msg: &Envelope) {
+        let payload: PlanSubmissionPayload = match serde_json::from_value(msg.payload.clone()) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
 
+        info!(
+            from = %msg.from,
+            task_id = %payload.task_id,
+            "Reviewing teammate plan"
+        );
+
+        let review_prompt = format!(
+            "A teammate submitted this implementation plan for task '{}'.\n\n\
+             Plan:\n{}\n\n\
+             Evaluate this plan. If it's reasonable and complete, respond with exactly: APPROVED\n\
+             If it needs changes, respond with: REJECTED: <your feedback>",
+            payload.task_id, payload.plan
+        );
+
+        let decision = match self.llm_client.ask("You are a technical lead reviewing implementation plans.", &review_prompt).await {
+            Ok((response, _)) => response,
+            Err(e) => {
+                warn!(error = %e, "Failed to review plan, auto-approving");
+                "APPROVED".to_string()
+            }
+        };
+
+        if decision.trim().starts_with("APPROVED") {
+            let reply = Envelope::new(
+                self.id,
+                MessageTarget::Agent(msg.from),
+                MessageKind::PlanApproved,
+            )
+            .in_reply_to(msg.id);
+            let _ = self.broker.route(&reply);
+            self.emit(AgentEvent::PlanApproved {
+                agent_id: msg.from,
+                task_id: payload.task_id,
+            });
+        } else {
+            let feedback = decision
+                .trim()
+                .strip_prefix("REJECTED:")
+                .unwrap_or(&decision)
+                .trim()
+                .to_string();
+            let reply = Envelope::new(
+                self.id,
+                MessageTarget::Agent(msg.from),
+                MessageKind::PlanRejected,
+            )
+            .with_payload(serde_json::json!({ "feedback": feedback }))
+            .in_reply_to(msg.id);
+            let _ = self.broker.route(&reply);
+            self.emit(AgentEvent::PlanRejected {
+                agent_id: msg.from,
+                task_id: payload.task_id,
+                feedback,
+            });
+        }
+    }
+
+    async fn spawn_teammate(
+        &self,
+        name: &str,
+        require_plan_approval: bool,
+    ) -> SdkResult<AgentHandle> {
+        let agent_id = Uuid::new_v4();
         self.broker.register_agent(agent_id)?;
 
         let ctx = AgentContext {
             agent_id,
+            name: name.to_string(),
             task_store: self.task_store.clone(),
             broker: self.broker.clone(),
             llm_client: self.llm_client.clone(),
@@ -195,16 +345,30 @@ impl TeamLead {
             memory_store: self.memory_store.clone(),
             max_loop_iterations: self.config.max_loop_iterations,
             event_tx: self.event_tx.clone(),
+            require_plan_approval,
+            hooks: self.hooks.clone(),
         };
 
         tokio::fs::create_dir_all(&ctx.work_dir).await?;
 
+        let teammate_name = name.to_string();
         let handle = tokio::spawn(async move {
             let teammate = Teammate::new(ctx);
             teammate.run().await
         });
 
-        info!(agent_id = %agent_id, "Teammate spawned");
-        Ok(AgentHandle::new(agent_id, handle))
+        info!(agent_id = %agent_id, name = %name, "Teammate spawned");
+        Ok(AgentHandle::new(agent_id, teammate_name, handle))
+    }
+
+    async fn spawn_named_teammate(&self, spec: &TeammateSpec) -> SdkResult<AgentHandle> {
+        self.spawn_teammate(&spec.name, spec.require_plan_approval)
+            .await
+    }
+
+    fn emit(&self, event: AgentEvent) {
+        if let Some(ref tx) = self.event_tx {
+            let _ = tx.send(event);
+        }
     }
 }
