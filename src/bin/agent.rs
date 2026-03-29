@@ -14,11 +14,11 @@ use console::style;
 #[derive(Parser)]
 #[command(name = "agent", about = "Interactive AI agent with tool access")]
 struct Cli {
-    /// LLM provider: claude or openai
-    #[arg(short, long, default_value = "claude")]
-    provider: String,
+    /// LLM provider: claude or openai (auto-detected from LLM_PROVIDER env)
+    #[arg(short, long)]
+    provider: Option<String>,
 
-    /// Model name
+    /// Model name (auto-detected from OPENAI_MODEL / ANTHROPIC_MODEL / LLM_MODEL env)
     #[arg(short, long)]
     model: Option<String>,
 
@@ -117,14 +117,38 @@ async fn main() -> anyhow::Result<()> {
 
     let work_dir = std::fs::canonicalize(&cli.dir)?;
 
-    let provider = match cli.provider.to_lowercase().as_str() {
-        "openai" | "open_ai" => LlmProvider::OpenAi,
-        _ => LlmProvider::Claude,
+    // Auto-detect provider: CLI flag > LLM_PROVIDER env > detect from available API keys
+    let provider = if let Some(ref p) = cli.provider {
+        match p.to_lowercase().as_str() {
+            "openai" | "open_ai" => LlmProvider::OpenAi,
+            _ => LlmProvider::Claude,
+        }
+    } else if std::env::var("LLM_PROVIDER")
+        .map(|v| v.to_lowercase())
+        .as_deref()
+        == Ok("openai")
+    {
+        LlmProvider::OpenAi
+    } else if std::env::var("OPENAI_API_KEY").is_ok()
+        && std::env::var("ANTHROPIC_API_KEY").is_err()
+    {
+        LlmProvider::OpenAi
+    } else {
+        LlmProvider::Claude
     };
 
-    let model = cli.model.unwrap_or_else(|| match provider {
-        LlmProvider::Claude => "claude-sonnet-4-20250514".to_string(),
-        LlmProvider::OpenAi => "gpt-4o".to_string(),
+    // Auto-detect model: CLI flag > provider-specific env > LLM_MODEL env > default
+    let model = cli.model.unwrap_or_else(|| {
+        let provider_env = match provider {
+            LlmProvider::Claude => "ANTHROPIC_MODEL",
+            LlmProvider::OpenAi => "OPENAI_MODEL",
+        };
+        std::env::var(provider_env)
+            .or_else(|_| std::env::var("LLM_MODEL"))
+            .unwrap_or_else(|_| match provider {
+                LlmProvider::Claude => "claude-sonnet-4-20250514".to_string(),
+                LlmProvider::OpenAi => "gpt-4o".to_string(),
+            })
     });
 
     let llm_config = LlmConfig {
@@ -133,8 +157,8 @@ async fn main() -> anyhow::Result<()> {
         max_tokens: cli.max_tokens,
         requests_per_minute: 60,
         tokens_per_minute: 200_000,
-        api_key: None,
-        api_base_url: None,
+        api_key: None,       // resolved from env by LlmConfig
+        api_base_url: None,  // resolved from env by LlmConfig
     };
 
     let llm_client = agent_sdk::llm::create_client(&llm_config)?;
