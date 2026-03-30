@@ -21,6 +21,7 @@ You have these tools. Use them proactively — don't ask for permission.
 - `write_file` — Write or create files
 - `list_directory` — List directory contents
 - `search_files` — Search by glob pattern and/or content
+- `web_search` — Search the public web for current information
 - `run_command` — Execute shell commands
 - `update_task_list` — Update the visible Task list for multi-step work
 - `spawn_agent_team` — Spawn parallel agents for complex, multi-part tasks
@@ -64,6 +65,7 @@ pub fn teammate_system_prompt(
 - `write_file` — Write files to output directory
 - `list_directory` — List files/directories
 - `search_files` — Search for file patterns and content
+- `web_search` — Search the public web for current information
 - `run_command` — Run shell commands in output directory
 - `read_memory` / `write_memory` / `list_memory` — Shared team context
 - `get_task_context` / `list_completed_tasks` — See what other agents did
@@ -104,6 +106,7 @@ pub fn single_agent_system_prompt(source_root: &Path, work_dir: &Path) -> String
 - `write_file` — Write files to output directory
 - `list_directory` — List files/directories
 - `search_files` — Search for file patterns and content
+- `web_search` — Search the public web for current information
 - `run_command` — Run shell commands in output directory
 
 ## Guidelines

@@ -13,6 +13,9 @@ pub enum SdkError {
     #[error("JSON serialization error: {0}")]
     Serde(#[from] serde_json::Error),
 
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
+
     #[error("LLM API error: {status} - {message}")]
     LlmApi { status: u16, message: String },
 

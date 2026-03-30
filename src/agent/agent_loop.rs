@@ -10,7 +10,7 @@ use crate::tools::registry::ToolRegistry;
 
 use super::events::AgentEvent;
 
-const BYTES_PER_TOKEN: usize = 4;
+const CHARS_PER_ESTIMATED_TOKEN: usize = 4;
 const DEFAULT_MAX_CONTEXT_TOKENS: usize = 200_000;
 const MAX_TOOL_RESULT_CHARS: usize = 12_000;
 const COMPACT_KEEP_RECENT: usize = 10;
@@ -24,6 +24,66 @@ pub struct AgentLoopResult {
     pub tool_calls_count: usize,
 }
 
+#[derive(Debug, Clone)]
+pub enum CompactionStrategy {
+    /// Auto: dynamically select a strategy based on overflow severity and message mix
+    Auto,
+    /// Default: Keep recent messages, compress older ones
+    Default,
+    /// Conservative: Preserve more context at cost of higher memory
+    Conservative,
+    /// Aggressive: More aggressive compression for resource-constrained environments
+    Aggressive,
+    /// Custom: User-defined compaction rules with specific parameters
+    Custom {
+        keep_recent: usize,
+        tool_result_chars_limit: usize,
+        assistant_content_limit: usize,
+        fallback_truncate_chars: usize,
+    },
+}
+
+impl Default for CompactionStrategy {
+    fn default() -> Self {
+        CompactionStrategy::Auto
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CompactionProfile {
+    keep_recent: usize,
+    tool_result_chars_limit: usize,
+    assistant_content_limit: usize,
+    fallback_truncate_chars: usize,
+    compress_user_messages: bool,
+}
+
+impl CompactionProfile {
+    const DEFAULT: Self = Self {
+        keep_recent: COMPACT_KEEP_RECENT,
+        tool_result_chars_limit: 200,
+        assistant_content_limit: 500,
+        fallback_truncate_chars: 2000,
+        compress_user_messages: false,
+    };
+
+    const CONSERVATIVE: Self = Self {
+        keep_recent: 15,
+        tool_result_chars_limit: 500,
+        assistant_content_limit: 1000,
+        fallback_truncate_chars: 5000,
+        compress_user_messages: false,
+    };
+
+    const AGGRESSIVE: Self = Self {
+        keep_recent: 5,
+        tool_result_chars_limit: 100,
+        assistant_content_limit: 100,
+        fallback_truncate_chars: 500,
+        compress_user_messages: true,
+    };
+}
+
 pub struct AgentLoop {
     agent_id: AgentId,
     agent_name: String,
@@ -31,10 +91,11 @@ pub struct AgentLoop {
     tools: ToolRegistry,
     messages: Vec<ChatMessage>,
     max_iterations: usize,
-    max_context_chars: usize,
+    max_context_tokens: usize,
     total_tokens: u64,
     tool_calls_count: usize,
     event_tx: Option<UnboundedSender<AgentEvent>>,
+    compaction_strategy: CompactionStrategy,
 }
 
 impl AgentLoop {
@@ -53,16 +114,23 @@ impl AgentLoop {
             tools,
             messages,
             max_iterations,
-            max_context_chars: DEFAULT_MAX_CONTEXT_TOKENS * BYTES_PER_TOKEN,
+            max_context_tokens: DEFAULT_MAX_CONTEXT_TOKENS,
             total_tokens: 0,
             tool_calls_count: 0,
             event_tx: None,
+            compaction_strategy: CompactionStrategy::default(),
         }
     }
 
     /// Set the maximum context window size in tokens.
     pub fn with_max_context_tokens(mut self, tokens: usize) -> Self {
-        self.max_context_chars = tokens * BYTES_PER_TOKEN;
+        self.max_context_tokens = tokens;
+        self
+    }
+
+    /// Set the compaction strategy to use.
+    pub fn with_compaction_strategy(mut self, strategy: CompactionStrategy) -> Self {
+        self.compaction_strategy = strategy;
         self
     }
 
@@ -87,10 +155,11 @@ impl AgentLoop {
             tools,
             messages,
             max_iterations,
-            max_context_chars: DEFAULT_MAX_CONTEXT_TOKENS * BYTES_PER_TOKEN,
+            max_context_tokens: DEFAULT_MAX_CONTEXT_TOKENS,
             total_tokens: 0,
             tool_calls_count: 0,
             event_tx: None,
+            compaction_strategy: CompactionStrategy::default(),
         }
     }
 
@@ -116,7 +185,7 @@ impl AgentLoop {
                 agent_id = %self.agent_id,
                 iteration,
                 messages = self.messages.len(),
-                context_chars = self.estimate_context_size(),
+                context_tokens = self.estimate_context_tokens(),
                 "Agent loop iteration"
             );
 
@@ -233,31 +302,119 @@ impl AgentLoop {
         })
     }
 
-    fn estimate_context_size(&self) -> usize {
-        self.messages.iter().map(|m| m.char_len()).sum()
+    fn estimate_context_tokens(&self) -> usize {
+        self.messages
+            .iter()
+            .map(|m| m.char_len().div_ceil(CHARS_PER_ESTIMATED_TOKEN))
+            .sum()
     }
 
     fn compact_if_needed(&mut self) {
-        let size = self.estimate_context_size();
-        if size <= self.max_context_chars {
+        let size = self.estimate_context_tokens();
+        if size <= self.max_context_tokens {
             return;
         }
 
         warn!(
             agent_id = %self.agent_id,
-            size_chars = size,
-            max_chars = self.max_context_chars,
+            estimated_tokens = size,
+            max_tokens = self.max_context_tokens,
             messages = self.messages.len(),
             "Context too large, compacting"
         );
 
+        let selected = self.resolve_compaction_strategy(size);
+        debug!(
+            agent_id = %self.agent_id,
+            configured = ?self.compaction_strategy,
+            selected = ?selected,
+            "Selected compaction strategy"
+        );
+
+        match selected {
+            CompactionStrategy::Auto | CompactionStrategy::Default => {
+                self.compact_with_profile(CompactionProfile::DEFAULT)
+            }
+            CompactionStrategy::Conservative => {
+                self.compact_with_profile(CompactionProfile::CONSERVATIVE)
+            }
+            CompactionStrategy::Aggressive => {
+                self.compact_with_profile(CompactionProfile::AGGRESSIVE)
+            }
+            CompactionStrategy::Custom {
+                keep_recent,
+                tool_result_chars_limit,
+                assistant_content_limit,
+                fallback_truncate_chars,
+            } => {
+                self.compact_with_custom_strategy(
+                    keep_recent,
+                    tool_result_chars_limit,
+                    assistant_content_limit,
+                    fallback_truncate_chars,
+                );
+            }
+        }
+
+        let new_size = self.estimate_context_tokens();
+        debug!(
+            agent_id = %self.agent_id,
+            before = size,
+            after = new_size,
+            "Context compacted"
+        );
+    }
+
+    fn resolve_compaction_strategy(&self, size: usize) -> CompactionStrategy {
+        match &self.compaction_strategy {
+            CompactionStrategy::Auto => self.select_dynamic_strategy(size),
+            other => other.clone(),
+        }
+    }
+
+    fn select_dynamic_strategy(&self, size: usize) -> CompactionStrategy {
+        let total = self.messages.len().max(1);
+        let overflow_ratio = size as f64 / self.max_context_tokens.max(1) as f64;
+        let tool_count = self.messages.iter().filter(|m| matches!(m, ChatMessage::Tool { .. })).count();
+        let assistant_count = self
+            .messages
+            .iter()
+            .filter(|m| matches!(m, ChatMessage::Assistant { .. }))
+            .count();
+        let tool_ratio = tool_count as f64 / total as f64;
+        let assistant_ratio = assistant_count as f64 / total as f64;
+
+        if overflow_ratio >= 1.8 || total >= 80 {
+            return CompactionStrategy::Aggressive;
+        }
+
+        if tool_ratio >= 0.35 {
+            return if overflow_ratio >= 1.25 {
+                CompactionStrategy::Aggressive
+            } else {
+                CompactionStrategy::Default
+            };
+        }
+
+        if assistant_ratio >= 0.45 && overflow_ratio < 1.2 {
+            return CompactionStrategy::Conservative;
+        }
+
+        if overflow_ratio >= 1.35 {
+            CompactionStrategy::Default
+        } else {
+            CompactionStrategy::Conservative
+        }
+    }
+
+    fn compact_with_profile(&mut self, profile: CompactionProfile) {
         let total = self.messages.len();
-        if total <= COMPACT_KEEP_RECENT + 2 {
-            self.truncate_all_tool_results(2000);
+        if total <= profile.keep_recent + 2 {
+            self.truncate_all_tool_results(profile.fallback_truncate_chars);
             return;
         }
 
-        let keep_after = total - COMPACT_KEEP_RECENT;
+        let keep_after = total - profile.keep_recent;
 
         for i in 1..keep_after {
             match &self.messages[i] {
@@ -265,11 +422,11 @@ impl AgentLoop {
                     tool_call_id,
                     content,
                 } => {
-                    if content.len() > 200 {
+                    if content.len() > profile.tool_result_chars_limit {
                         let summary = format!(
                             "[compacted: {} chars] {}",
                             content.len(),
-                            safe_prefix(content, 150)
+                            safe_prefix(content, profile.tool_result_chars_limit.saturating_sub(50))
                         );
                         self.messages[i] = ChatMessage::Tool {
                             tool_call_id: tool_call_id.clone(),
@@ -280,24 +437,41 @@ impl AgentLoop {
                 ChatMessage::Assistant {
                     content,
                     tool_calls,
-                } if content.as_ref().is_some_and(|c| c.len() > 500) => {
-                    let short = content.as_ref().map(|c| truncate(c, 200));
+                } if content
+                    .as_ref()
+                    .is_some_and(|c| c.len() > profile.assistant_content_limit) =>
+                {
+                    let short = content
+                        .as_ref()
+                        .map(|c| truncate(c, profile.assistant_content_limit.saturating_sub(100)));
                     self.messages[i] = ChatMessage::Assistant {
                         content: short,
                         tool_calls: tool_calls.clone(),
                     };
                 }
+                ChatMessage::User { content } if profile.compress_user_messages && content.len() > 200 => {
+                    let short = truncate(content, 150);
+                    self.messages[i] = ChatMessage::User { content: short };
+                }
                 _ => {}
             }
         }
+    }
 
-        let new_size = self.estimate_context_size();
-        debug!(
-            agent_id = %self.agent_id,
-            before = size,
-            after = new_size,
-            "Context compacted"
-        );
+    fn compact_with_custom_strategy(
+        &mut self,
+        keep_recent: usize,
+        tool_result_chars_limit: usize,
+        assistant_content_limit: usize,
+        fallback_truncate_chars: usize,
+    ) {
+        self.compact_with_profile(CompactionProfile {
+            keep_recent,
+            tool_result_chars_limit,
+            assistant_content_limit,
+            fallback_truncate_chars,
+            compress_user_messages: false,
+        });
     }
 
     fn truncate_all_tool_results(&mut self, max_chars: usize) {

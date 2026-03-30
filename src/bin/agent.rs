@@ -12,6 +12,7 @@ use agent_sdk::tools::fs_tools::{ListDirectoryTool, ReadFileTool, WriteFileTool}
 use agent_sdk::tools::registry::ToolRegistry;
 use agent_sdk::tools::search_tools::SearchFilesTool;
 use agent_sdk::tools::team_tools::SpawnAgentTeamTool;
+use agent_sdk::tools::web_tools::WebSearchTool;
 use agent_sdk::traits::tool::{Tool, ToolDefinition};
 use agent_sdk::types::chat::ChatMessage;
 use agent_sdk::AgentEvent;
@@ -161,7 +162,7 @@ fn print_help() {
     eprintln!();
     eprintln!("  {}", style("Slash commands").bold().underlined());
     eprintln!("    {}     Clear conversation & start fresh", style("/clear").cyan());
-    eprintln!("    {}    Compact conversation (free context)", style("/compact").cyan());
+    eprintln!("    {}    Compact conversation with dynamic strategy", style("/compact").cyan());
     eprintln!("    {}     Show current task list", style("/tasks").cyan());
     eprintln!("    {}      Show session info", style("/cost").cyan());
     eprintln!("    {}      Show this help", style("/help").cyan());
@@ -210,6 +211,10 @@ fn format_tool_label(tool_name: &str, arguments: &str) -> String {
                 .unwrap_or("files");
             format!("Search {}", style(pattern).white())
         }
+        "web_search" => {
+            let query = arg_str(&args, "query").unwrap_or("web");
+            format!("Web search {}", style(query).white())
+        }
         "run_command" => {
             let cmd = arg_str(&args, "command").unwrap_or("?");
             let short = if cmd.len() > 60 { &cmd[..60] } else { cmd };
@@ -248,6 +253,10 @@ fn format_result_preview(tool_name: &str, result: &str) -> String {
             } else {
                 "done".to_string()
             }
+        }
+        "web_search" => {
+            let count = val["count"].as_u64().unwrap_or(0);
+            format!("{} web results", count)
         }
         "run_command" => {
             let code = val["exit_code"].as_i64().unwrap_or(-1);
@@ -321,25 +330,22 @@ fn print_team_plan(arguments: &str) {
         );
         for (idx, task) in tasks.iter().enumerate() {
             let title = task["title"].as_str().unwrap_or("untitled");
-            let target = task["target_file"].as_str().unwrap_or("?");
             let depends_on = task["depends_on"].as_array().cloned().unwrap_or_default();
-            let dep_text = if depends_on.is_empty() {
-                "deps: none".to_string()
+            let line = if depends_on.is_empty() {
+                title.to_string()
             } else {
                 let deps = depends_on
                     .iter()
                     .filter_map(|v| v.as_u64())
-                    .map(|v| format!("#{}", v))
+                    .map(|v| (v + 1).to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("deps: {}", deps)
+                format!("{} [deps: {}]", title, deps)
             };
             eprintln!(
-                "      {} {} {} {}",
-                style(format!("{}. ", idx)).magenta(),
-                style(title).white(),
-                style(format!("→ {}", target)).dim(),
-                style(format!("({})", dep_text)).dim(),
+                "      {} {}",
+                style(format!("{}. ", idx + 1)).magenta(),
+                style(line).white(),
             );
         }
     }
@@ -555,6 +561,7 @@ fn build_tools(
     registry.register(Arc::new(SearchFilesTool {
         source_root: work_dir.to_path_buf(),
     }));
+    registry.register(Arc::new(WebSearchTool));
 
     if allow_all {
         registry.register(Arc::new(RunCommandTool {
@@ -653,6 +660,14 @@ struct TurnStats {
     tokens: u64,
     tool_calls: usize,
     duration: std::time::Duration,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CliCompactionProfile {
+    keep_recent: usize,
+    tool_limit: usize,
+    assistant_limit: usize,
+    compress_user_messages: bool,
 }
 
 async fn run_turn(
@@ -811,14 +826,59 @@ async fn run_turn(
 
 // ─── Compact ─────────────────────────────────────────────────────────────────
 
-fn compact_conversation(messages: &mut Vec<ChatMessage>) -> usize {
-    let before = messages.len();
-    if before <= 4 {
-        return 0;
+fn select_cli_compaction_profile(messages: &[ChatMessage]) -> (&'static str, CliCompactionProfile) {
+    let total = messages.len().max(1);
+    let tool_count = messages.iter().filter(|m| matches!(m, ChatMessage::Tool { .. })).count();
+    let assistant_count = messages
+        .iter()
+        .filter(|m| matches!(m, ChatMessage::Assistant { .. }))
+        .count();
+    let tool_ratio = tool_count as f64 / total as f64;
+    let assistant_ratio = assistant_count as f64 / total as f64;
+
+    if total >= 60 || tool_ratio >= 0.35 {
+        return (
+            "aggressive",
+            CliCompactionProfile {
+                keep_recent: 5,
+                tool_limit: 120,
+                assistant_limit: 120,
+                compress_user_messages: true,
+            },
+        );
     }
 
-    // Keep system prompt + last 6 messages, compact everything in between
-    let keep_tail = 6usize.min(before - 1);
+    if assistant_ratio >= 0.45 {
+        return (
+            "conservative",
+            CliCompactionProfile {
+                keep_recent: 8,
+                tool_limit: 350,
+                assistant_limit: 250,
+                compress_user_messages: false,
+            },
+        );
+    }
+
+    (
+        "default",
+        CliCompactionProfile {
+            keep_recent: 6,
+            tool_limit: 200,
+            assistant_limit: 150,
+            compress_user_messages: false,
+        },
+    )
+}
+
+fn compact_conversation(messages: &mut Vec<ChatMessage>) -> (usize, &'static str) {
+    let before = messages.len();
+    if before <= 4 {
+        return (0, "none");
+    }
+
+    let (strategy, profile) = select_cli_compaction_profile(messages);
+    let keep_tail = profile.keep_recent.min(before - 1);
     let compact_end = before - keep_tail;
 
     for i in 1..compact_end {
@@ -827,7 +887,7 @@ fn compact_conversation(messages: &mut Vec<ChatMessage>) -> usize {
                 tool_call_id,
                 content,
             } => {
-                if content.len() > 200 {
+                if content.len() > profile.tool_limit {
                     let summary = format!("[compacted: {} chars]", content.len());
                     messages[i] = ChatMessage::Tool {
                         tool_call_id: tool_call_id.clone(),
@@ -838,11 +898,19 @@ fn compact_conversation(messages: &mut Vec<ChatMessage>) -> usize {
             ChatMessage::Assistant {
                 content,
                 tool_calls,
-            } if content.as_ref().is_some_and(|c| c.len() > 300) => {
-                let short = content.as_ref().map(|c| truncate(c, 150));
+            } if content
+                .as_ref()
+                .is_some_and(|c| c.len() > profile.assistant_limit) =>
+            {
+                let short = content.as_ref().map(|c| truncate(c, profile.assistant_limit));
                 messages[i] = ChatMessage::Assistant {
                     content: short,
                     tool_calls: tool_calls.clone(),
+                };
+            }
+            ChatMessage::User { content } if profile.compress_user_messages && content.len() > 200 => {
+                messages[i] = ChatMessage::User {
+                    content: truncate(content, 150),
                 };
             }
             _ => {}
@@ -851,7 +919,7 @@ fn compact_conversation(messages: &mut Vec<ChatMessage>) -> usize {
 
     let _ = before - messages.len();
     // Messages aren't removed, just shortened — return count of compacted entries
-    compact_end.saturating_sub(1)
+    (compact_end.saturating_sub(1), strategy)
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -1183,16 +1251,17 @@ async fn main() -> anyhow::Result<()> {
             }
 
             "/compact" => {
-                let freed = compact_conversation(&mut messages);
+                let (freed, strategy) = compact_conversation(&mut messages);
                 save_session(
                     &session_path,
                     &messages,
                     &tasks.lock().expect("task list mutex poisoned"),
                 )?;
                 eprintln!(
-                    "  {} compacted {} messages ({} remaining)",
+                    "  {} compacted {} messages using {} strategy ({} remaining)",
                     style("↻").green(),
                     freed,
+                    style(strategy).dim(),
                     messages.len(),
                 );
                 eprintln!();

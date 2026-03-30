@@ -261,6 +261,7 @@ impl AgentTeam {
         use crate::tools::fs_tools::{ListDirectoryTool, ReadFileTool, WriteFileTool};
         use crate::tools::registry::ToolRegistry;
         use crate::tools::search_tools::SearchFilesTool;
+        use crate::tools::web_tools::WebSearchTool;
 
         let mut tools = ToolRegistry::new();
         tools.register(Arc::new(ReadFileTool {
@@ -277,6 +278,7 @@ impl AgentTeam {
         tools.register(Arc::new(SearchFilesTool {
             source_root: self.source_root.clone(),
         }));
+        tools.register(Arc::new(WebSearchTool));
         tools.register(Arc::new(RunCommandTool::with_defaults(
             self.work_dir.clone(),
         )));

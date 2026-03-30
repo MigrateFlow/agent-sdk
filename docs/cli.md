@@ -72,6 +72,7 @@ The CLI registers:
 - `write_file`
 - `list_directory`
 - `search_files`
+- `web_search`
 - `run_command`
 - `update_task_list`
 - `spawn_agent_team`
@@ -99,6 +100,7 @@ Session behavior:
 - the current single-agent `Task` list is persisted in the same session file
 - restarting the CLI in the same working directory resumes that conversation if the system prompt matches
 - `/clear` and `/new` both reset the session back to the system prompt only
+- `/compact` now selects a compaction strategy dynamically based on the current conversation shape
 - `/tasks` shows the current visible `Task` list
 - `/status` shows the active session file and current message count
 

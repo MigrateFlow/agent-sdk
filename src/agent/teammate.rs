@@ -16,6 +16,7 @@ use crate::tools::fs_tools::{ListDirectoryTool, ReadFileTool, WriteFileTool};
 use crate::tools::memory_tools::{ListMemoryTool, ReadMemoryTool, WriteMemoryTool};
 use crate::tools::registry::ToolRegistry;
 use crate::tools::search_tools::SearchFilesTool;
+use crate::tools::web_tools::WebSearchTool;
 
 use super::agent_loop::AgentLoop;
 use super::context::AgentContext;
@@ -50,6 +51,7 @@ impl Teammate {
         registry.register(Arc::new(SearchFilesTool {
             source_root: self.ctx.source_root.clone(),
         }));
+        registry.register(Arc::new(WebSearchTool));
         registry.register(Arc::new(RunCommandTool::with_defaults(
             self.ctx.work_dir.clone(),
         )));
