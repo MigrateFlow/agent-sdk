@@ -32,7 +32,7 @@ cargo run --bin agent
     --max-iterations <N>           default 50
     --system <PROMPT>              override system prompt
     --session <PATH>               custom REPL session file
-    --allow-all-commands           disable command allowlist
+    --allow-all-commands           legacy flag; commands are already unrestricted
 ```
 
 Examples:
@@ -40,7 +40,6 @@ Examples:
 ```bash
 cargo run --bin agent -- -p openai -m gpt-4o
 cargo run --bin agent -- -d /path/to/repo "review the main module"
-cargo run --bin agent -- --allow-all-commands "run the exact debug command you need"
 cargo run --bin agent -- --session /tmp/agent-session.json
 ```
 
@@ -74,31 +73,12 @@ The CLI registers:
 - `list_directory`
 - `search_files`
 - `run_command`
+- `update_task_list`
 - `spawn_agent_team`
 
-By default, `run_command` is limited to:
+`run_command` can execute any shell command available inside the current environment.
 
-- `javac`
-- `java`
-- `mvn`
-- `gradle`
-- `cargo`
-- `go`
-- `npm`
-- `node`
-- `python`
-- `python3`
-- `cat`
-- `head`
-- `tail`
-- `wc`
-- `diff`
-- `find`
-- `grep`
-- `ls`
-- `tree`
-
-`--allow-all-commands` removes that restriction.
+`--allow-all-commands` is now effectively a no-op and kept only for backward compatibility.
 
 ## REPL Commands
 
@@ -107,6 +87,7 @@ Interactive mode supports:
 - `/help`
 - `/clear`
 - `/new`
+- `/tasks`
 - `/status`
 - `/quit`
 - `/exit`
@@ -115,8 +96,10 @@ Interactive mode supports:
 Session behavior:
 
 - interactive mode now persists conversation history by default at `<workdir>/.agent/cli-session.json`
+- the current single-agent `Task` list is persisted in the same session file
 - restarting the CLI in the same working directory resumes that conversation if the system prompt matches
 - `/clear` and `/new` both reset the session back to the system prompt only
+- `/tasks` shows the current visible `Task` list
 - `/status` shows the active session file and current message count
 
 One-shot mode still uses a fresh in-memory conversation and exits when the prompt completes.
@@ -124,6 +107,15 @@ One-shot mode still uses a fresh in-memory conversation and exits when the promp
 ## Team Spawning From The CLI
 
 The CLI prompt explicitly tells the model that it may call `spawn_agent_team` for complex tasks.
+
+When a team is spawned, the CLI now prints a plan preview before execution:
+
+- teammate list and roles
+- numbered task list
+- declared dependencies
+- auto-assignment mode
+
+After the team starts, the CLI also prints a short task-assignment summary from the tool result before streaming teammate events.
 
 Use cases where the current design makes sense:
 

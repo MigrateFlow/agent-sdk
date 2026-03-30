@@ -269,7 +269,7 @@ impl AgentLoop {
                         let summary = format!(
                             "[compacted: {} chars] {}",
                             content.len(),
-                            &content[..content.len().min(150)]
+                            safe_prefix(content, 150)
                         );
                         self.messages[i] = ChatMessage::Tool {
                             tool_call_id: tool_call_id.clone(),
@@ -311,7 +311,7 @@ impl AgentLoop {
                     let summary = format!(
                         "[truncated: {} chars] {}",
                         content.len(),
-                        &content[..content.len().min(max_chars)]
+                        safe_prefix(content, max_chars)
                     );
                     *msg = ChatMessage::Tool {
                         tool_call_id: tool_call_id.clone(),
@@ -341,13 +341,13 @@ fn truncate_tool_result(s: &str) -> String {
                     let limit = MAX_TOOL_RESULT_CHARS - 200;
                     let truncated = format!(
                         "{}...\n\n[truncated: showing {}/{} chars. Use offset parameter to read more.]",
-                        &text[..limit],
+                        safe_prefix(text, limit),
                         limit,
                         text.len()
                     );
                     *content = serde_json::Value::String(truncated);
                     return serde_json::to_string(&val)
-                        .unwrap_or_else(|_| s[..MAX_TOOL_RESULT_CHARS].to_string());
+                        .unwrap_or_else(|_| safe_prefix(s, MAX_TOOL_RESULT_CHARS).to_string());
                 }
             }
         }
@@ -355,7 +355,7 @@ fn truncate_tool_result(s: &str) -> String {
 
     format!(
         "{}...[truncated: {}/{} chars]",
-        &s[..MAX_TOOL_RESULT_CHARS],
+        safe_prefix(s, MAX_TOOL_RESULT_CHARS),
         MAX_TOOL_RESULT_CHARS,
         s.len()
     )
@@ -365,6 +365,17 @@ fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len])
+        format!("{}...", safe_prefix(s, max_len))
+    }
+}
+
+fn safe_prefix(s: &str, max_len: usize) -> &str {
+    if s.len() <= max_len {
+        return s;
+    }
+
+    match s.char_indices().map(|(idx, _)| idx).take_while(|&idx| idx <= max_len).last() {
+        Some(0) | None => "",
+        Some(idx) => &s[..idx],
     }
 }

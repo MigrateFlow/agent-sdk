@@ -239,5 +239,5 @@ Arguments:
 Notes:
 
 - Executes in `work_dir`
-- `RunCommandTool::with_defaults(...)` applies a built-in allowlist
-- An empty allowlist means unrestricted command execution
+- `RunCommandTool::with_defaults(...)` is unrestricted by default
+- command execution is limited only by the current environment and process permissions

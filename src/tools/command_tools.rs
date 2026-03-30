@@ -15,14 +15,7 @@ impl RunCommandTool {
     pub fn with_defaults(work_dir: PathBuf) -> Self {
         Self {
             work_dir,
-            allowed_commands: vec![
-                "javac", "java", "mvn", "gradle", "cargo", "go", "npm", "node",
-                "python", "python3", "cat", "head", "tail", "wc", "diff",
-                "find", "grep", "ls", "tree",
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect(),
+            allowed_commands: vec![],
         }
     }
 

@@ -1,20 +1,25 @@
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::sync::Arc;
 use std::time::Instant;
 
+use async_trait::async_trait;
 use agent_sdk::config::{LlmConfig, LlmProvider};
 use agent_sdk::tools::command_tools::RunCommandTool;
 use agent_sdk::tools::fs_tools::{ListDirectoryTool, ReadFileTool, WriteFileTool};
 use agent_sdk::tools::registry::ToolRegistry;
 use agent_sdk::tools::search_tools::SearchFilesTool;
 use agent_sdk::tools::team_tools::SpawnAgentTeamTool;
+use agent_sdk::traits::tool::{Tool, ToolDefinition};
 use agent_sdk::types::chat::ChatMessage;
 use agent_sdk::AgentEvent;
 use clap::Parser;
 use console::{style, Term};
 use indicatif::{ProgressBar, ProgressStyle};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 // ─── CLI args ────────────────────────────────────────────────────────────────
 
@@ -59,6 +64,19 @@ struct Cli {
 
     /// One-shot mode: run this prompt and exit
     prompt: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CliTask {
+    title: String,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CliSessionData {
+    messages: Vec<ChatMessage>,
+    #[serde(default)]
+    tasks: Vec<CliTask>,
 }
 
 // ─── Display helpers ─────────────────────────────────────────────────────────
@@ -144,6 +162,7 @@ fn print_help() {
     eprintln!("  {}", style("Slash commands").bold().underlined());
     eprintln!("    {}     Clear conversation & start fresh", style("/clear").cyan());
     eprintln!("    {}    Compact conversation (free context)", style("/compact").cyan());
+    eprintln!("    {}     Show current task list", style("/tasks").cyan());
     eprintln!("    {}      Show session info", style("/cost").cyan());
     eprintln!("    {}      Show this help", style("/help").cyan());
     eprintln!("    {}      Exit", style("/quit").cyan());
@@ -248,6 +267,10 @@ fn format_result_preview(tool_name: &str, result: &str) -> String {
             let total = val["total_tasks"].as_u64().unwrap_or(0);
             format!("{} ({}/{} tasks)", status, completed, total)
         }
+        "update_task_list" => {
+            let count = val["count"].as_u64().unwrap_or(0);
+            format!("{} tasks updated", count)
+        }
         _ => {
             if let Some(err) = val["error"].as_str() {
                 format!("error: {}", truncate(err, 60))
@@ -256,6 +279,122 @@ fn format_result_preview(tool_name: &str, result: &str) -> String {
             }
         }
     }
+}
+
+fn print_team_plan(arguments: &str) {
+    let args: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+    let teammates = args["teammates"].as_array().cloned().unwrap_or_default();
+    let tasks = args["tasks"].as_array().cloned().unwrap_or_default();
+    let auto_assign = args["auto_assign"].as_bool().unwrap_or(true);
+
+    eprintln!("  {}", style("Team Plan").magenta().bold());
+
+    if !teammates.is_empty() {
+        eprintln!("    {}", style("teammates").dim());
+        for teammate in teammates {
+            let name = teammate["name"].as_str().unwrap_or("unnamed");
+            let role = teammate["role"].as_str().unwrap_or("");
+            let needs_plan = teammate["require_plan_approval"].as_bool().unwrap_or(false);
+            if needs_plan {
+                eprintln!(
+                    "      {} {} {}",
+                    style("•").magenta(),
+                    style(name).white().bold(),
+                    style(format!("— {} [plan approval]", truncate(role, 80))).dim(),
+                );
+            } else {
+                eprintln!(
+                    "      {} {} {}",
+                    style("•").magenta(),
+                    style(name).white().bold(),
+                    style(format!("— {}", truncate(role, 80))).dim(),
+                );
+            }
+        }
+    }
+
+    if !tasks.is_empty() {
+        eprintln!(
+            "    {} {}",
+            style("tasks").dim(),
+            style(if auto_assign { "(auto-assign)" } else { "(claim freely)" }).dim(),
+        );
+        for (idx, task) in tasks.iter().enumerate() {
+            let title = task["title"].as_str().unwrap_or("untitled");
+            let target = task["target_file"].as_str().unwrap_or("?");
+            let depends_on = task["depends_on"].as_array().cloned().unwrap_or_default();
+            let dep_text = if depends_on.is_empty() {
+                "deps: none".to_string()
+            } else {
+                let deps = depends_on
+                    .iter()
+                    .filter_map(|v| v.as_u64())
+                    .map(|v| format!("#{}", v))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("deps: {}", deps)
+            };
+            eprintln!(
+                "      {} {} {} {}",
+                style(format!("{}. ", idx)).magenta(),
+                style(title).white(),
+                style(format!("→ {}", target)).dim(),
+                style(format!("({})", dep_text)).dim(),
+            );
+        }
+    }
+
+    eprintln!();
+}
+
+fn print_team_result_summary(result: &str) {
+    let val: serde_json::Value = serde_json::from_str(result).unwrap_or_default();
+    let assignments = val["task_assignments"].as_array().cloned().unwrap_or_default();
+    if assignments.is_empty() {
+        return;
+    }
+
+    eprintln!("  {}", style("Task Assignments").magenta().bold());
+    for (idx, assignment) in assignments.iter().enumerate() {
+        let title = assignment["title"].as_str().unwrap_or("untitled");
+        let target = assignment["target_file"].as_str().unwrap_or("?");
+        let assignee = assignment["assigned_teammate"].as_str().unwrap_or("unassigned");
+        eprintln!(
+            "    {} {} {} {}",
+            style(format!("{}. ", idx)).magenta(),
+            style(title).white(),
+            style(format!("→ {}", target)).dim(),
+            style(format!("[{}]", assignee)).cyan(),
+        );
+    }
+    eprintln!();
+}
+
+fn task_status_symbol(status: &str) -> &'static str {
+    match status {
+        "completed" => "✓",
+        "in_progress" => "→",
+        "blocked" => "!",
+        _ => "•",
+    }
+}
+
+fn print_task_list(tasks: &[CliTask]) {
+    if tasks.is_empty() {
+        return;
+    }
+
+    eprintln!("  {}", style("Task List").cyan().bold());
+    for (idx, task) in tasks.iter().enumerate() {
+        eprintln!(
+            "    {} {} {} {}",
+            style(format!("{}. ", idx + 1)).cyan(),
+            style(task_status_symbol(&task.status)).cyan(),
+            style(&task.title).white(),
+            style(format!("[{}]", task.status)).dim(),
+        );
+    }
+    eprintln!();
 }
 
 fn arg_str<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
@@ -329,6 +468,68 @@ fn format_token_count(n: u64) -> String {
     }
 }
 
+struct UpdateTaskListTool {
+    tasks: Arc<Mutex<Vec<CliTask>>>,
+}
+
+#[async_trait]
+impl Tool for UpdateTaskListTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "update_task_list".to_string(),
+            description: "Update the visible task list for the current single-agent session. Use this for multi-step work to show the current tasks and their statuses. Status must be pending, in_progress, completed, or blocked.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": { "type": "string" },
+                                "status": { "type": "string", "enum": ["pending", "in_progress", "completed", "blocked"] }
+                            },
+                            "required": ["title", "status"]
+                        }
+                    }
+                },
+                "required": ["items"]
+            }),
+        }
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> agent_sdk::SdkResult<serde_json::Value> {
+        let items = arguments["items"].as_array().cloned().unwrap_or_default();
+        if items.is_empty() {
+            return Ok(json!({ "error": "Missing or empty 'items' array" }));
+        }
+
+        let tasks = items
+            .into_iter()
+            .filter_map(|item| {
+                let title = item["title"].as_str()?.trim();
+                let status = item["status"].as_str()?.trim();
+                if title.is_empty() || status.is_empty() {
+                    return None;
+                }
+                Some(CliTask {
+                    title: title.to_string(),
+                    status: status.to_string(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if tasks.is_empty() {
+            return Ok(json!({ "error": "No valid task items provided" }));
+        }
+
+        let mut guard = self.tasks.lock().expect("task list mutex poisoned");
+        *guard = tasks;
+
+        Ok(json!({ "updated": true, "count": guard.len() }))
+    }
+}
+
 // ─── Tools & session ─────────────────────────────────────────────────────────
 
 fn build_tools(
@@ -336,6 +537,7 @@ fn build_tools(
     allow_all: bool,
     llm_client: Arc<dyn agent_sdk::traits::llm_client::LlmClient>,
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
+    tasks: Arc<Mutex<Vec<CliTask>>>,
 ) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
 
@@ -370,6 +572,8 @@ fn build_tools(
         event_tx,
     }));
 
+    registry.register(Arc::new(UpdateTaskListTool { tasks }));
+
     registry
 }
 
@@ -379,22 +583,35 @@ fn default_session_path(work_dir: &Path) -> PathBuf {
         .join("session.json")
 }
 
-fn load_session(path: &Path, system_prompt: &str) -> Option<Vec<ChatMessage>> {
+fn load_session(path: &Path, system_prompt: &str) -> Option<CliSessionData> {
     let content = std::fs::read_to_string(path).ok()?;
-    let messages: Vec<ChatMessage> = serde_json::from_str(&content).ok()?;
+    let session = serde_json::from_str::<CliSessionData>(&content)
+        .ok()
+        .or_else(|| {
+            serde_json::from_str::<Vec<ChatMessage>>(&content)
+                .ok()
+                .map(|messages| CliSessionData {
+                    messages,
+                    tasks: Vec::new(),
+                })
+        })?;
 
     // Validate system prompt matches
-    match messages.first() {
-        Some(ChatMessage::System { content }) if content == system_prompt => Some(messages),
+    match session.messages.first() {
+        Some(ChatMessage::System { content }) if content == system_prompt => Some(session),
         _ => None,
     }
 }
 
-fn save_session(path: &Path, messages: &[ChatMessage]) -> anyhow::Result<()> {
+fn save_session(path: &Path, messages: &[ChatMessage], tasks: &[CliTask]) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, serde_json::to_string(messages)?)?;
+    let session = CliSessionData {
+        messages: messages.to_vec(),
+        tasks: tasks.to_vec(),
+    };
+    std::fs::write(path, serde_json::to_string(&session)?)?;
     Ok(())
 }
 
@@ -446,9 +663,16 @@ async fn run_turn(
     max_iterations: usize,
     allow_all: bool,
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
+    tasks: Arc<Mutex<Vec<CliTask>>>,
     interrupt: Arc<AtomicBool>,
 ) -> anyhow::Result<TurnStats> {
-    let tools = build_tools(work_dir, allow_all, llm_client.clone(), event_tx);
+    let tools = build_tools(
+        work_dir,
+        allow_all,
+        llm_client.clone(),
+        event_tx,
+        tasks.clone(),
+    );
     let tool_defs = tools.definitions();
     let started = Instant::now();
 
@@ -507,6 +731,10 @@ async fn run_turn(
                     let label = format_tool_label(&tc.function.name, &tc.function.arguments);
                     eprintln!("  {} {}", style("⎿").cyan(), label);
 
+                    if tc.function.name == "spawn_agent_team" {
+                        print_team_plan(&tc.function.arguments);
+                    }
+
                     let args: serde_json::Value =
                         serde_json::from_str(&tc.function.arguments).unwrap_or_default();
 
@@ -522,6 +750,13 @@ async fn run_turn(
 
                     let preview = format_result_preview(&tc.function.name, &result_content);
                     eprintln!("    {}", style(&preview).dim());
+
+                    if tc.function.name == "spawn_agent_team" {
+                        print_team_result_summary(&result_content);
+                    } else if tc.function.name == "update_task_list" {
+                        let current = tasks.lock().expect("task list mutex poisoned").clone();
+                        print_task_list(&current);
+                    }
 
                     messages.push(ChatMessage::tool_result(&tc.id, &result_content));
                     tool_calls_count += 1;
@@ -863,6 +1098,7 @@ async fn main() -> anyhow::Result<()> {
     if !cli.prompt.is_empty() {
         let prompt = cli.prompt.join(" ");
         let mut messages = vec![ChatMessage::system(&system_prompt)];
+        let tasks = Arc::new(Mutex::new(Vec::<CliTask>::new()));
 
         let stats = run_turn(
             &mut messages,
@@ -872,6 +1108,7 @@ async fn main() -> anyhow::Result<()> {
             cli.max_iterations,
             cli.allow_all_commands,
             Some(event_tx),
+            tasks,
             interrupt,
         )
         .await?;
@@ -883,16 +1120,24 @@ async fn main() -> anyhow::Result<()> {
     // ── Interactive REPL ──
     print_welcome(&model, &work_dir);
 
+    let tasks = Arc::new(Mutex::new(Vec::<CliTask>::new()));
+
     let mut messages = match load_session(&session_path, &system_prompt) {
-        Some(msgs) => {
-            let n = msgs.len();
+        Some(session) => {
+            let n = session.messages.len();
+            {
+                let mut current = tasks.lock().expect("task list mutex poisoned");
+                *current = session.tasks;
+            }
             eprintln!(
                 "  {} restored ({} messages)",
                 style("↻").green(),
                 style(n).dim(),
             );
             eprintln!();
-            msgs
+            let current = tasks.lock().expect("task list mutex poisoned").clone();
+            print_task_list(&current);
+            session.messages
         }
         None => {
             vec![ChatMessage::system(&system_prompt)]
@@ -920,7 +1165,15 @@ async fn main() -> anyhow::Result<()> {
 
             "/clear" | "/new" => {
                 messages = vec![ChatMessage::system(&system_prompt)];
-                save_session(&session_path, &messages)?;
+                {
+                    let mut current = tasks.lock().expect("task list mutex poisoned");
+                    current.clear();
+                }
+                save_session(
+                    &session_path,
+                    &messages,
+                    &tasks.lock().expect("task list mutex poisoned"),
+                )?;
                 session_tokens = 0;
                 session_tool_calls = 0;
                 session_turns = 0;
@@ -931,7 +1184,11 @@ async fn main() -> anyhow::Result<()> {
 
             "/compact" => {
                 let freed = compact_conversation(&mut messages);
-                save_session(&session_path, &messages)?;
+                save_session(
+                    &session_path,
+                    &messages,
+                    &tasks.lock().expect("task list mutex poisoned"),
+                )?;
                 eprintln!(
                     "  {} compacted {} messages ({} remaining)",
                     style("↻").green(),
@@ -955,7 +1212,15 @@ async fn main() -> anyhow::Result<()> {
                     style(session_tool_calls).white(),
                     style(messages.len()).dim(),
                 );
+                let current = tasks.lock().expect("task list mutex poisoned").clone();
+                print_task_list(&current);
                 eprintln!();
+                continue;
+            }
+
+            "/tasks" => {
+                let current = tasks.lock().expect("task list mutex poisoned").clone();
+                print_task_list(&current);
                 continue;
             }
 
@@ -986,6 +1251,7 @@ async fn main() -> anyhow::Result<()> {
             cli.max_iterations,
             cli.allow_all_commands,
             Some(event_tx.clone()),
+            tasks.clone(),
             interrupt.clone(),
         )
         .await?;
@@ -996,7 +1262,11 @@ async fn main() -> anyhow::Result<()> {
 
         print_usage(&stats);
 
-        if let Err(e) = save_session(&session_path, &messages) {
+        if let Err(e) = save_session(
+            &session_path,
+            &messages,
+            &tasks.lock().expect("task list mutex poisoned"),
+        ) {
             eprintln!("  {} session save: {}", style("⚠").yellow(), e);
         }
     }
