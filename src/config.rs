@@ -126,7 +126,7 @@ fn default_max_loop_iterations() -> usize {
 }
 
 fn default_max_context_tokens() -> usize {
-    100_000
+    200_000
 }
 
 fn default_max_idle_cycles() -> u32 {

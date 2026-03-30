@@ -17,28 +17,33 @@ pub enum AgentEvent {
     // --- Task lifecycle ---
     TaskStarted {
         agent_id: AgentId,
+        name: String,
         task_id: TaskId,
         title: String,
     },
     Thinking {
         agent_id: AgentId,
+        name: String,
         content: String,
         iteration: usize,
     },
     ToolCall {
         agent_id: AgentId,
+        name: String,
         tool_name: String,
         arguments: String,
         iteration: usize,
     },
     ToolResult {
         agent_id: AgentId,
+        name: String,
         tool_name: String,
         result_preview: String,
         iteration: usize,
     },
     TaskCompleted {
         agent_id: AgentId,
+        name: String,
         task_id: TaskId,
         tokens_used: u64,
         iterations: usize,
@@ -46,6 +51,7 @@ pub enum AgentEvent {
     },
     TaskFailed {
         agent_id: AgentId,
+        name: String,
         task_id: TaskId,
         error: String,
     },
@@ -53,15 +59,18 @@ pub enum AgentEvent {
     // --- Plan mode ---
     PlanSubmitted {
         agent_id: AgentId,
+        name: String,
         task_id: TaskId,
         plan_preview: String,
     },
     PlanApproved {
         agent_id: AgentId,
+        name: String,
         task_id: TaskId,
     },
     PlanRejected {
         agent_id: AgentId,
+        name: String,
         task_id: TaskId,
         feedback: String,
     },
@@ -69,27 +78,33 @@ pub enum AgentEvent {
     // --- Communication ---
     TeammateMessage {
         from: AgentId,
+        from_name: String,
         to: AgentId,
         content_preview: String,
     },
     TeammateIdle {
         agent_id: AgentId,
+        name: String,
         tasks_completed: usize,
     },
 
     // --- Shutdown ---
     ShutdownRequested {
         agent_id: AgentId,
+        name: String,
     },
     ShutdownAccepted {
         agent_id: AgentId,
+        name: String,
     },
     ShutdownRejected {
         agent_id: AgentId,
+        name: String,
         reason: String,
     },
     AgentShutdown {
         agent_id: AgentId,
+        name: String,
     },
 
     // --- Hooks ---
@@ -122,8 +137,33 @@ impl AgentEvent {
             | Self::ShutdownAccepted { agent_id, .. }
             | Self::ShutdownRejected { agent_id, .. }
             | Self::TeammateSpawned { agent_id, .. }
-            | Self::AgentShutdown { agent_id } => Some(*agent_id),
+            | Self::AgentShutdown { agent_id, .. } => Some(*agent_id),
             Self::TeammateMessage { from, .. } => Some(*from),
+            Self::TeamSpawned { .. }
+            | Self::HookRejected { .. }
+            | Self::Custom { .. } => None,
+        }
+    }
+
+    /// Get the human-readable teammate name, if present.
+    pub fn agent_name(&self) -> Option<&str> {
+        match self {
+            Self::TeammateSpawned { name, .. }
+            | Self::TaskStarted { name, .. }
+            | Self::Thinking { name, .. }
+            | Self::ToolCall { name, .. }
+            | Self::ToolResult { name, .. }
+            | Self::TaskCompleted { name, .. }
+            | Self::TaskFailed { name, .. }
+            | Self::PlanSubmitted { name, .. }
+            | Self::PlanApproved { name, .. }
+            | Self::PlanRejected { name, .. }
+            | Self::TeammateIdle { name, .. }
+            | Self::ShutdownRequested { name, .. }
+            | Self::ShutdownAccepted { name, .. }
+            | Self::ShutdownRejected { name, .. }
+            | Self::AgentShutdown { name, .. } => Some(name),
+            Self::TeammateMessage { from_name, .. } => Some(from_name),
             Self::TeamSpawned { .. }
             | Self::HookRejected { .. }
             | Self::Custom { .. } => None,

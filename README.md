@@ -381,7 +381,7 @@ AgentConfig {
     poll_interval_ms: 200,       // task polling interval
     max_task_retries: 3,         // retries before permanent failure
     max_loop_iterations: 50,     // max ReAct iterations per task
-    max_context_tokens: 100_000, // context window budget
+    max_context_tokens: 200_000, // context window budget
 }
 ```
 

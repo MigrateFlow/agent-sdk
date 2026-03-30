@@ -1,6 +1,8 @@
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use agent_sdk::config::{LlmConfig, LlmProvider};
 use agent_sdk::tools::command_tools::RunCommandTool;
@@ -11,16 +13,23 @@ use agent_sdk::tools::team_tools::SpawnAgentTeamTool;
 use agent_sdk::types::chat::ChatMessage;
 use agent_sdk::AgentEvent;
 use clap::Parser;
-use console::style;
+use console::{style, Term};
+use indicatif::{ProgressBar, ProgressStyle};
+
+// ─── CLI args ────────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
-#[command(name = "agent", about = "Interactive AI agent with tool access")]
+#[command(
+    name = "agent",
+    about = "AI coding assistant — minimal Claude Code",
+    version
+)]
 struct Cli {
-    /// LLM provider: claude or openai (auto-detected from LLM_PROVIDER env)
+    /// LLM provider: claude or openai (auto-detected from env)
     #[arg(short, long)]
     provider: Option<String>,
 
-    /// Model name (auto-detected from OPENAI_MODEL / ANTHROPIC_MODEL / LLM_MODEL env)
+    /// Model name (auto-detected from env)
     #[arg(short, long)]
     model: Option<String>,
 
@@ -32,7 +41,7 @@ struct Cli {
     #[arg(long, default_value = "16384")]
     max_tokens: usize,
 
-    /// Max ReAct iterations per turn
+    /// Max ReAct loop iterations per turn
     #[arg(long, default_value = "50")]
     max_iterations: usize,
 
@@ -40,11 +49,11 @@ struct Cli {
     #[arg(long)]
     system: Option<String>,
 
-    /// Allow all shell commands (no whitelist)
+    /// Allow all shell commands (skip whitelist)
     #[arg(long)]
     allow_all_commands: bool,
 
-    /// Session file for interactive mode (defaults to <workdir>/.agent/cli-session.json)
+    /// Session file path
     #[arg(long)]
     session: Option<PathBuf>,
 
@@ -52,12 +61,278 @@ struct Cli {
     prompt: Vec<String>,
 }
 
-fn build_system_prompt(work_dir: &std::path::Path) -> String {
-    agent_sdk::prompts::cli_system_prompt(work_dir)
+// ─── Display helpers ─────────────────────────────────────────────────────────
+
+/// Shorten home dir to ~ for display.
+fn display_path(path: &Path) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(rel) = path.strip_prefix(&home) {
+            return format!("~/{}", rel.display());
+        }
+    }
+    path.display().to_string()
 }
 
+/// Detect current git branch (returns None if not a git repo).
+fn git_branch(work_dir: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(work_dir)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
+fn print_welcome(model: &str, work_dir: &Path) {
+    let version = env!("CARGO_PKG_VERSION");
+    let branch = git_branch(work_dir);
+    let dir = display_path(work_dir);
+
+    let term = Term::stderr();
+    let width = term.size().1 as usize;
+    let box_width = width.min(60).max(40);
+    let inner = box_width - 4; // "│ " + content + " │"
+
+    let bar = "─".repeat(box_width - 2);
+
+    eprintln!();
+    eprintln!("  {}{}{}",
+        style("╭").dim(), style(&bar).dim(), style("╮").dim());
+
+    let title = format!("✻ agent v{}", version);
+    let pad = inner.saturating_sub(console::measure_text_width(&title));
+    eprintln!("  {} {}{} {}",
+        style("│").dim(),
+        style(&title).cyan().bold(),
+        " ".repeat(pad),
+        style("│").dim());
+
+    let model_line = format!("model: {}", model);
+    let pad = inner.saturating_sub(model_line.len());
+    eprintln!("  {} {}{} {}",
+        style("│").dim(),
+        style(&model_line).white(),
+        " ".repeat(pad),
+        style("│").dim());
+
+    let cwd_line = if let Some(ref b) = branch {
+        format!("cwd:   {} ({})", dir, b)
+    } else {
+        format!("cwd:   {}", dir)
+    };
+    let pad = inner.saturating_sub(console::measure_text_width(&cwd_line));
+    eprintln!("  {} {}{} {}",
+        style("│").dim(),
+        &cwd_line,
+        " ".repeat(pad),
+        style("│").dim());
+
+    eprintln!("  {}{}{}",
+        style("╰").dim(), style(&bar).dim(), style("╯").dim());
+
+    eprintln!();
+    eprintln!("  {}", style("/help for commands · Ctrl+C to cancel").dim());
+    eprintln!();
+}
+
+fn print_help() {
+    eprintln!();
+    eprintln!("  {}", style("Slash commands").bold().underlined());
+    eprintln!("    {}     Clear conversation & start fresh", style("/clear").cyan());
+    eprintln!("    {}    Compact conversation (free context)", style("/compact").cyan());
+    eprintln!("    {}      Show session info", style("/cost").cyan());
+    eprintln!("    {}      Show this help", style("/help").cyan());
+    eprintln!("    {}      Exit", style("/quit").cyan());
+    eprintln!();
+    eprintln!("  {}", style("Tips").bold().underlined());
+    eprintln!("    End a line with {} for multi-line input", style("\\").cyan());
+    eprintln!("    {} interrupts the current generation", style("Ctrl+C").cyan());
+    eprintln!("    Use {} for one-shot mode", style("agent \"your prompt\"").cyan());
+    eprintln!();
+}
+
+fn create_spinner(msg: &str) -> ProgressBar {
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+            .template("  {spinner:.cyan} {msg}")
+            .unwrap(),
+    );
+    pb.set_message(msg.to_string());
+    pb.enable_steady_tick(std::time::Duration::from_millis(80));
+    pb
+}
+
+/// Format a tool call for display (Claude Code style).
+fn format_tool_label(tool_name: &str, arguments: &str) -> String {
+    let args: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+
+    match tool_name {
+        "read_file" => {
+            let path = arg_str(&args, "path").unwrap_or("?");
+            format!("Read {}", style(path).white())
+        }
+        "write_file" => {
+            let path = arg_str(&args, "path").unwrap_or("?");
+            format!("Write {}", style(path).white())
+        }
+        "list_directory" => {
+            let path = arg_str(&args, "path").unwrap_or(".");
+            format!("List {}", style(path).white())
+        }
+        "search_files" => {
+            let pattern = arg_str(&args, "file_pattern")
+                .or_else(|| arg_str(&args, "content_pattern"))
+                .unwrap_or("files");
+            format!("Search {}", style(pattern).white())
+        }
+        "run_command" => {
+            let cmd = arg_str(&args, "command").unwrap_or("?");
+            let short = if cmd.len() > 60 { &cmd[..60] } else { cmd };
+            format!("$ {}", style(short).white())
+        }
+        "spawn_agent_team" => "Spawning agent team…".to_string(),
+        _ => {
+            let name = humanize(tool_name);
+            format!("{}", name)
+        }
+    }
+}
+
+/// Format a tool result preview line.
+fn format_result_preview(tool_name: &str, result: &str) -> String {
+    let val: serde_json::Value = serde_json::from_str(result).unwrap_or_default();
+
+    match tool_name {
+        "read_file" => {
+            let lines = val["lines"].as_u64().unwrap_or(0);
+            format!("{} lines", lines)
+        }
+        "write_file" => {
+            let written = val["lines_written"].as_u64().unwrap_or(0);
+            format!("{} lines written", written)
+        }
+        "list_directory" => {
+            let count = val["count"].as_u64().unwrap_or(0);
+            format!("{} entries", count)
+        }
+        "search_files" => {
+            if let Some(n) = val["files_with_matches"].as_u64() {
+                format!("{} files matched", n)
+            } else if let Some(n) = val["total_matches"].as_u64() {
+                format!("{} matches", n)
+            } else {
+                "done".to_string()
+            }
+        }
+        "run_command" => {
+            let code = val["exit_code"].as_i64().unwrap_or(-1);
+            if code == 0 {
+                let stdout = val["stdout"].as_str().unwrap_or("");
+                let lines = stdout.lines().count();
+                format!("exit 0 ({} lines)", lines)
+            } else {
+                let stderr = val["stderr"].as_str().unwrap_or("");
+                let first_line = stderr.lines().next().unwrap_or("failed");
+                format!("exit {} — {}", code, truncate(first_line, 60))
+            }
+        }
+        "spawn_agent_team" => {
+            let status = val["status"].as_str().unwrap_or("?");
+            let completed = val["tasks_completed"].as_u64().unwrap_or(0);
+            let total = val["total_tasks"].as_u64().unwrap_or(0);
+            format!("{} ({}/{} tasks)", status, completed, total)
+        }
+        _ => {
+            if let Some(err) = val["error"].as_str() {
+                format!("error: {}", truncate(err, 60))
+            } else {
+                truncate(result, 60)
+            }
+        }
+    }
+}
+
+fn arg_str<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    args.get(key).and_then(|v| v.as_str())
+}
+
+fn humanize(name: &str) -> String {
+    let mut out = String::new();
+    for (i, part) in name.split('_').filter(|s| !s.is_empty()).enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            out.push(first.to_ascii_uppercase());
+            out.push_str(chars.as_str());
+        }
+    }
+    if out.is_empty() { name.to_string() } else { out }
+}
+
+fn truncate(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max_len])
+    }
+}
+
+const MAX_TOOL_RESULT_CHARS: usize = 12_000;
+
+fn truncate_tool_result(s: &str) -> String {
+    if s.len() <= MAX_TOOL_RESULT_CHARS {
+        return s.to_string();
+    }
+
+    if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(s) {
+        if let Some(content) = val.get_mut("content") {
+            if let Some(text) = content.as_str() {
+                if text.len() > MAX_TOOL_RESULT_CHARS - 200 {
+                    let limit = MAX_TOOL_RESULT_CHARS - 200;
+                    let truncated = format!(
+                        "{}…\n\n[truncated: {}/{} chars — use offset to read more]",
+                        &text[..limit],
+                        limit,
+                        text.len()
+                    );
+                    *content = serde_json::Value::String(truncated);
+                    return serde_json::to_string(&val)
+                        .unwrap_or_else(|_| s[..MAX_TOOL_RESULT_CHARS].to_string());
+                }
+            }
+        }
+    }
+
+    format!(
+        "{}…[truncated: {}/{} chars]",
+        &s[..MAX_TOOL_RESULT_CHARS],
+        MAX_TOOL_RESULT_CHARS,
+        s.len()
+    )
+}
+
+fn format_token_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+// ─── Tools & session ─────────────────────────────────────────────────────────
+
 fn build_tools(
-    work_dir: &std::path::Path,
+    work_dir: &Path,
     allow_all: bool,
     llm_client: Arc<dyn agent_sdk::traits::llm_client::LlmClient>,
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
@@ -88,7 +363,6 @@ fn build_tools(
         registry.register(Arc::new(RunCommandTool::with_defaults(work_dir.to_path_buf())));
     }
 
-    // Agent team tool — lets the LLM decide when to spawn a team
     registry.register(Arc::new(SpawnAgentTeamTool {
         work_dir: work_dir.to_path_buf(),
         source_root: work_dir.to_path_buf(),
@@ -100,44 +374,252 @@ fn build_tools(
 }
 
 fn default_session_path(work_dir: &Path) -> PathBuf {
-    work_dir.join(agent_sdk::config::AGENT_DIR).join("cli-session.json")
+    work_dir
+        .join(agent_sdk::config::AGENT_DIR)
+        .join("session.json")
 }
 
-fn load_session(
-    session_path: &Path,
-    system_prompt: &str,
-) -> anyhow::Result<Option<Vec<ChatMessage>>> {
-    if !session_path.exists() {
-        return Ok(None);
+fn load_session(path: &Path, system_prompt: &str) -> Option<Vec<ChatMessage>> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let messages: Vec<ChatMessage> = serde_json::from_str(&content).ok()?;
+
+    // Validate system prompt matches
+    match messages.first() {
+        Some(ChatMessage::System { content }) if content == system_prompt => Some(messages),
+        _ => None,
     }
-
-    let content = std::fs::read_to_string(session_path)?;
-    let messages: Vec<ChatMessage> = serde_json::from_str(&content)?;
-
-    let first_ok = matches!(
-        messages.first(),
-        Some(ChatMessage::System { content }) if content == system_prompt
-    );
-
-    if !first_ok {
-        return Ok(None);
-    }
-
-    Ok(Some(messages))
 }
 
-fn save_session(session_path: &Path, messages: &[ChatMessage]) -> anyhow::Result<()> {
-    if let Some(parent) = session_path.parent() {
+fn save_session(path: &Path, messages: &[ChatMessage]) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let content = serde_json::to_string_pretty(messages)?;
-    std::fs::write(session_path, content)?;
+    std::fs::write(path, serde_json::to_string(messages)?)?;
     Ok(())
 }
 
-fn fresh_session(system_prompt: &str) -> Vec<ChatMessage> {
-    vec![ChatMessage::system(system_prompt)]
+// ─── Input ───────────────────────────────────────────────────────────────────
+
+/// Read input with multi-line support (trailing `\` continues).
+fn read_input() -> io::Result<String> {
+    let stdin = io::stdin();
+    let mut full = String::new();
+
+    loop {
+        let mut line = String::new();
+        stdin.lock().read_line(&mut line)?;
+
+        if line.is_empty() {
+            // EOF
+            return Ok(full);
+        }
+
+        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+
+        if trimmed.ends_with('\\') {
+            full.push_str(&trimmed[..trimmed.len() - 1]);
+            full.push('\n');
+            eprint!("  {} ", style("…").dim());
+            io::stderr().flush()?;
+        } else {
+            full.push_str(trimmed);
+            break;
+        }
+    }
+
+    Ok(full)
 }
+
+// ─── ReAct turn ──────────────────────────────────────────────────────────────
+
+struct TurnStats {
+    tokens: u64,
+    tool_calls: usize,
+    duration: std::time::Duration,
+}
+
+async fn run_turn(
+    messages: &mut Vec<ChatMessage>,
+    user_input: &str,
+    llm_client: &Arc<dyn agent_sdk::traits::llm_client::LlmClient>,
+    work_dir: &Path,
+    max_iterations: usize,
+    allow_all: bool,
+    event_tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
+    interrupt: Arc<AtomicBool>,
+) -> anyhow::Result<TurnStats> {
+    let tools = build_tools(work_dir, allow_all, llm_client.clone(), event_tx);
+    let tool_defs = tools.definitions();
+    let started = Instant::now();
+
+    messages.push(ChatMessage::user(user_input));
+
+    let mut total_tokens = 0u64;
+    let mut tool_calls_count = 0usize;
+
+    for _iteration in 0..max_iterations {
+        // Check for interrupt before each LLM call
+        if interrupt.load(Ordering::Relaxed) {
+            interrupt.store(false, Ordering::Relaxed);
+            eprintln!("\n  {}", style("⏎ Cancelled").yellow());
+            return Ok(TurnStats {
+                tokens: total_tokens,
+                tool_calls: tool_calls_count,
+                duration: started.elapsed(),
+            });
+        }
+
+        let spinner = create_spinner("Thinking…");
+
+        let result = llm_client.chat(messages, &tool_defs).await;
+
+        spinner.finish_and_clear();
+
+        // Check interrupt after call returns
+        if interrupt.load(Ordering::Relaxed) {
+            interrupt.store(false, Ordering::Relaxed);
+            eprintln!("  {}", style("⏎ Cancelled").yellow());
+            return Ok(TurnStats {
+                tokens: total_tokens,
+                tool_calls: tool_calls_count,
+                duration: started.elapsed(),
+            });
+        }
+
+        let (response, tokens) = result?;
+        total_tokens += tokens;
+
+        match response {
+            ChatMessage::Assistant {
+                ref content,
+                ref tool_calls,
+            } if !tool_calls.is_empty() => {
+                // Show thinking text
+                if let Some(text) = content {
+                    if !text.is_empty() {
+                        eprintln!("  {}", style(truncate(text, 200)).dim().italic());
+                    }
+                }
+
+                messages.push(response.clone());
+
+                for tc in tool_calls {
+                    let label = format_tool_label(&tc.function.name, &tc.function.arguments);
+                    eprintln!("  {} {}", style("⎿").cyan(), label);
+
+                    let args: serde_json::Value =
+                        serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+
+                    let result = tools.execute(&tc.function.name, args).await;
+
+                    let result_content = match &result {
+                        Ok(val) => {
+                            let full = serde_json::to_string(val).unwrap_or_default();
+                            truncate_tool_result(&full)
+                        }
+                        Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+                    };
+
+                    let preview = format_result_preview(&tc.function.name, &result_content);
+                    eprintln!("    {}", style(&preview).dim());
+
+                    messages.push(ChatMessage::tool_result(&tc.id, &result_content));
+                    tool_calls_count += 1;
+                }
+                eprintln!();
+            }
+
+            ChatMessage::Assistant { ref content, .. } => {
+                let answer = content.clone().unwrap_or_default();
+                messages.push(response);
+
+                // Print final answer
+                eprintln!();
+                for line in answer.lines() {
+                    println!("{}", line);
+                }
+                eprintln!();
+
+                return Ok(TurnStats {
+                    tokens: total_tokens,
+                    tool_calls: tool_calls_count,
+                    duration: started.elapsed(),
+                });
+            }
+
+            other => {
+                let text = other.text_content().unwrap_or("").to_string();
+                messages.push(other);
+                eprintln!();
+                println!("{}", text);
+                eprintln!();
+                return Ok(TurnStats {
+                    tokens: total_tokens,
+                    tool_calls: tool_calls_count,
+                    duration: started.elapsed(),
+                });
+            }
+        }
+    }
+
+    eprintln!(
+        "  {} max iterations ({}) reached",
+        style("⚠").yellow(),
+        max_iterations,
+    );
+    Ok(TurnStats {
+        tokens: total_tokens,
+        tool_calls: tool_calls_count,
+        duration: started.elapsed(),
+    })
+}
+
+// ─── Compact ─────────────────────────────────────────────────────────────────
+
+fn compact_conversation(messages: &mut Vec<ChatMessage>) -> usize {
+    let before = messages.len();
+    if before <= 4 {
+        return 0;
+    }
+
+    // Keep system prompt + last 6 messages, compact everything in between
+    let keep_tail = 6usize.min(before - 1);
+    let compact_end = before - keep_tail;
+
+    for i in 1..compact_end {
+        match &messages[i] {
+            ChatMessage::Tool {
+                tool_call_id,
+                content,
+            } => {
+                if content.len() > 200 {
+                    let summary = format!("[compacted: {} chars]", content.len());
+                    messages[i] = ChatMessage::Tool {
+                        tool_call_id: tool_call_id.clone(),
+                        content: summary,
+                    };
+                }
+            }
+            ChatMessage::Assistant {
+                content,
+                tool_calls,
+            } if content.as_ref().is_some_and(|c| c.len() > 300) => {
+                let short = content.as_ref().map(|c| truncate(c, 150));
+                messages[i] = ChatMessage::Assistant {
+                    content: short,
+                    tool_calls: tool_calls.clone(),
+                };
+            }
+            _ => {}
+        }
+    }
+
+    let _ = before - messages.len();
+    // Messages aren't removed, just shortened — return count of compacted entries
+    compact_end.saturating_sub(1)
+}
+
+// ─── Main ────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -152,10 +634,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-
     let work_dir = std::fs::canonicalize(&cli.dir)?;
 
-    // Auto-detect provider
+    // ── Provider detection ──
     let provider = if let Some(ref p) = cli.provider {
         match p.to_lowercase().as_str() {
             "openai" | "open_ai" => LlmProvider::OpenAi,
@@ -165,15 +646,14 @@ async fn main() -> anyhow::Result<()> {
         .map(|v| v.to_lowercase())
         .as_deref()
         == Ok("openai")
-        || (std::env::var("OPENAI_API_KEY").is_ok()
-            && std::env::var("ANTHROPIC_API_KEY").is_err())
+        || (std::env::var("OPENAI_API_KEY").is_ok() && std::env::var("ANTHROPIC_API_KEY").is_err())
     {
         LlmProvider::OpenAi
     } else {
         LlmProvider::Claude
     };
 
-    // Auto-detect model
+    // ── Model detection ──
     let model = cli.model.unwrap_or_else(|| {
         let provider_env = match provider {
             LlmProvider::Claude => "ANTHROPIC_MODEL",
@@ -196,149 +676,195 @@ async fn main() -> anyhow::Result<()> {
 
     let llm_client = agent_sdk::llm::create_client(&llm_config)?;
 
-    // Event channel for team monitoring
+    // ── Event channel for team monitoring ──
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
-    // Spawn event printer in background
     tokio::spawn(async move {
+        // Color palette for teammates — cycle through these
+        const COLORS: &[console::Color] = &[
+            console::Color::Magenta,
+            console::Color::Blue,
+            console::Color::Yellow,
+            console::Color::Green,
+            console::Color::Cyan,
+            console::Color::Red,
+        ];
+        let mut color_map = std::collections::HashMap::<String, console::Color>::new();
+        let mut next_color = 0usize;
+
+        let teammate_color = |name: &str, map: &mut std::collections::HashMap<String, console::Color>, next: &mut usize| -> console::Color {
+            *map.entry(name.to_string()).or_insert_with(|| {
+                let c = COLORS[*next % COLORS.len()];
+                *next += 1;
+                c
+            })
+        };
+
+        // Fixed-width name tag for alignment
+        let name_tag = |name: &str, color: console::Color| -> String {
+            let display = if name.len() > 18 { &name[..18] } else { name };
+            format!("{}", style(format!("{:<18}", display)).fg(color).bold())
+        };
+
         while let Some(event) = event_rx.recv().await {
             match event {
                 AgentEvent::TeamSpawned { teammate_count } => {
+                    eprintln!();
                     eprintln!(
-                        "  {} spawned {} teammates",
-                        style("team").magenta().bold(),
+                        "  {} {} teammates",
+                        style("⎿ Team").cyan().bold(),
                         style(teammate_count).white(),
                     );
                 }
-                AgentEvent::TeammateSpawned { name, .. } => {
+                AgentEvent::TeammateSpawned { ref name, .. } => {
+                    let c = teammate_color(name, &mut color_map, &mut next_color);
                     eprintln!(
-                        "  {} + {}",
-                        style("team").magenta().bold(),
-                        style(&name).magenta(),
+                        "    {} {}",
+                        style("+").fg(c),
+                        style(name).fg(c).bold(),
                     );
                 }
-                AgentEvent::TaskStarted { title, .. } => {
+                AgentEvent::TaskStarted { ref name, ref title, .. } => {
+                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    eprintln!();
                     eprintln!(
-                        "  {} {}",
-                        style("task").blue().bold(),
-                        style(&title).blue(),
+                        "    {} {} {}",
+                        name_tag(name, c),
+                        style("▸").fg(c),
+                        title,
+                    );
+                }
+                AgentEvent::Thinking { ref name, ref content, .. } => {
+                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    eprintln!(
+                        "    {} {}",
+                        name_tag(name, c),
+                        style(truncate(content, 80)).dim().italic(),
                     );
                 }
                 AgentEvent::ToolCall {
-                    agent_id,
-                    tool_name,
-                    arguments,
+                    ref name,
+                    ref tool_name,
+                    ref arguments,
                     ..
                 } => {
-                    let short_id = short_agent_id(&agent_id);
-                    let label = format_teammate_tool_call(&tool_name, &arguments);
-                    eprintln!("  {} {}", style(short_id).magenta(), label);
+                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    let label = format_tool_label(tool_name, arguments);
+                    eprintln!(
+                        "    {} {} {}",
+                        name_tag(name, c),
+                        style("⎿").fg(c),
+                        label,
+                    );
                 }
                 AgentEvent::ToolResult {
-                    agent_id,
-                    tool_name,
-                    result_preview,
+                    ref name,
+                    ref tool_name,
+                    ref result_preview,
                     ..
                 } => {
-                    let short_id = short_agent_id(&agent_id);
-                    let tool = humanize_tool_name(&tool_name);
+                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    let preview = format_result_preview(tool_name, result_preview);
                     eprintln!(
-                        "  {} -> {} {}",
-                        style(short_id).magenta(),
-                        style(tool).dim(),
-                        result_preview
+                        "    {}   {}",
+                        name_tag(name, c),
+                        style(&preview).dim(),
                     );
                 }
                 AgentEvent::TaskCompleted {
+                    ref name,
                     tokens_used,
                     tool_calls,
                     ..
                 } => {
+                    let c = teammate_color(name, &mut color_map, &mut next_color);
                     eprintln!(
-                        "  {} {} tokens, {} tool calls",
-                        style("  done").green().dim(),
-                        style(tokens_used).dim(),
-                        style(tool_calls).dim(),
+                        "    {} {} {} tokens · {} tools",
+                        name_tag(name, c),
+                        style("✓").green(),
+                        format_token_count(tokens_used),
+                        tool_calls,
                     );
                 }
-                AgentEvent::TaskFailed { error, .. } => {
+                AgentEvent::TaskFailed { ref name, ref error, .. } => {
+                    let c = teammate_color(name, &mut color_map, &mut next_color);
                     eprintln!(
-                        "  {} {}",
-                        style("  fail").red().bold(),
-                        style(&error).red().dim(),
+                        "    {} {} {}",
+                        name_tag(name, c),
+                        style("✗").red(),
+                        style(truncate(error, 60)).red().dim(),
                     );
                 }
-                AgentEvent::PlanSubmitted { plan_preview, .. } => {
+                AgentEvent::PlanSubmitted { ref name, ref plan_preview, .. } => {
+                    let c = teammate_color(name, &mut color_map, &mut next_color);
                     eprintln!(
-                        "  {} {}",
-                        style("plan").yellow().bold(),
-                        style(&plan_preview).dim(),
+                        "    {} {} {}",
+                        name_tag(name, c),
+                        style("plan").yellow(),
+                        style(truncate(plan_preview, 60)).dim(),
                     );
                 }
-                AgentEvent::PlanApproved { .. } => {
-                    eprintln!("  {} approved", style("plan").yellow().bold());
-                }
-                AgentEvent::PlanRejected { feedback, .. } => {
+                AgentEvent::PlanApproved { ref name, .. } => {
+                    let c = teammate_color(name, &mut color_map, &mut next_color);
                     eprintln!(
-                        "  {} rejected: {}",
-                        style("plan").yellow().bold(),
-                        style(&feedback).dim(),
+                        "    {} {} approved",
+                        name_tag(name, c),
+                        style("plan").green(),
                     );
                 }
-                AgentEvent::TeammateIdle { .. } => {
-                    eprintln!("  {} teammate idle", style("team").magenta().dim());
+                AgentEvent::PlanRejected { ref name, ref feedback, .. } => {
+                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    eprintln!(
+                        "    {} {} rejected: {}",
+                        name_tag(name, c),
+                        style("plan").yellow(),
+                        style(truncate(feedback, 60)).dim(),
+                    );
                 }
-                AgentEvent::ShutdownRequested { .. } => {
-                    eprintln!("  {} shutting down", style("team").magenta().dim());
+                AgentEvent::TeammateIdle { ref name, tasks_completed, .. } => {
+                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    eprintln!(
+                        "    {} {} idle ({} tasks done)",
+                        name_tag(name, c),
+                        style("…").dim(),
+                        tasks_completed,
+                    );
+                }
+                AgentEvent::AgentShutdown { ref name, .. } => {
+                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    eprintln!(
+                        "    {} {}",
+                        name_tag(name, c),
+                        style("done").dim(),
+                    );
                 }
                 _ => {}
             }
         }
     });
 
+    // ── System prompt ──
     let system_prompt = cli
         .system
-        .unwrap_or_else(|| build_system_prompt(&work_dir));
+        .unwrap_or_else(|| agent_sdk::prompts::cli_system_prompt(&work_dir));
 
-    eprintln!(
-        "{} {} ({})",
-        style("agent").cyan().bold(),
-        style(&model).white(),
-        style(work_dir.display()).dim(),
-    );
     let session_path = cli
         .session
-        .clone()
         .unwrap_or_else(|| default_session_path(&work_dir));
 
-    eprintln!("{}", style("  Type your message, press Enter to send. Ctrl+C to exit.").dim());
-    eprintln!();
+    // ── Ctrl+C handling ──
+    let interrupt = Arc::new(AtomicBool::new(false));
+    {
+        let interrupt = interrupt.clone();
+        ctrlc_handler(interrupt);
+    }
 
-    let mut messages = if cli.prompt.is_empty() {
-        match load_session(&session_path, &system_prompt)? {
-            Some(messages) => {
-                eprintln!(
-                    "{} {} ({})",
-                    style("session").green().bold(),
-                    style("restored conversation").green(),
-                    style(format!("{} messages", messages.len())).dim(),
-                );
-                messages
-            }
-            None => {
-                let fresh = fresh_session(&system_prompt);
-                save_session(&session_path, &fresh)?;
-                fresh
-            }
-        }
-    } else {
-        fresh_session(&system_prompt)
-    };
-
-    // One-shot mode
+    // ── One-shot mode ──
     if !cli.prompt.is_empty() {
         let prompt = cli.prompt.join(" ");
-        run_turn(
+        let mut messages = vec![ChatMessage::system(&system_prompt)];
+
+        let stats = run_turn(
             &mut messages,
             &prompt,
             &llm_client,
@@ -346,14 +872,39 @@ async fn main() -> anyhow::Result<()> {
             cli.max_iterations,
             cli.allow_all_commands,
             Some(event_tx),
+            interrupt,
         )
         .await?;
+
+        print_usage(&stats);
         return Ok(());
     }
 
-    // REPL mode
+    // ── Interactive REPL ──
+    print_welcome(&model, &work_dir);
+
+    let mut messages = match load_session(&session_path, &system_prompt) {
+        Some(msgs) => {
+            let n = msgs.len();
+            eprintln!(
+                "  {} restored ({} messages)",
+                style("↻").green(),
+                style(n).dim(),
+            );
+            eprintln!();
+            msgs
+        }
+        None => {
+            vec![ChatMessage::system(&system_prompt)]
+        }
+    };
+
+    let mut session_tokens = 0u64;
+    let mut session_tool_calls = 0usize;
+    let mut session_turns = 0usize;
+
     loop {
-        eprint!("{} ", style(">").cyan().bold());
+        eprint!("{} ", style("❯").cyan().bold());
         io::stderr().flush()?;
 
         let input = read_input()?;
@@ -363,32 +914,71 @@ async fn main() -> anyhow::Result<()> {
             continue;
         }
 
+        // ── Slash commands ──
         match input.as_str() {
             "/quit" | "/exit" | "/q" => break,
+
             "/clear" | "/new" => {
-                messages = fresh_session(&system_prompt);
+                messages = vec![ChatMessage::system(&system_prompt)];
                 save_session(&session_path, &messages)?;
-                eprintln!("{}", style("  Conversation cleared.").dim());
+                session_tokens = 0;
+                session_tool_calls = 0;
+                session_turns = 0;
+                eprintln!("  {}", style("Conversation cleared.").dim());
+                eprintln!();
                 continue;
             }
+
+            "/compact" => {
+                let freed = compact_conversation(&mut messages);
+                save_session(&session_path, &messages)?;
+                eprintln!(
+                    "  {} compacted {} messages ({} remaining)",
+                    style("↻").green(),
+                    freed,
+                    messages.len(),
+                );
+                eprintln!();
+                continue;
+            }
+
+            "/cost" | "/status" => {
+                eprintln!(
+                    "  {} {}",
+                    style("session").white().bold(),
+                    style(&display_path(&session_path)).dim(),
+                );
+                eprintln!(
+                    "  {} turns · {} tokens · {} tool calls · {} messages",
+                    style(session_turns).white(),
+                    style(format_token_count(session_tokens)).white(),
+                    style(session_tool_calls).white(),
+                    style(messages.len()).dim(),
+                );
+                eprintln!();
+                continue;
+            }
+
             "/help" => {
                 print_help();
                 continue;
             }
-            "/status" => {
+
+            cmd if cmd.starts_with('/') => {
                 eprintln!(
-                    "  {} {} | {} {}",
-                    style("session").green().bold(),
-                    style(session_path.display()).dim(),
-                    style("messages").green().bold(),
-                    style(messages.len()).dim(),
+                    "  {} unknown command: {}",
+                    style("?").yellow(),
+                    style(cmd).dim(),
                 );
+                eprintln!("  {}", style("Type /help for available commands").dim());
+                eprintln!();
                 continue;
             }
+
             _ => {}
         }
 
-        run_turn(
+        let stats = run_turn(
             &mut messages,
             &input,
             &llm_client,
@@ -396,263 +986,63 @@ async fn main() -> anyhow::Result<()> {
             cli.max_iterations,
             cli.allow_all_commands,
             Some(event_tx.clone()),
+            interrupt.clone(),
         )
         .await?;
 
-        save_session(&session_path, &messages)?;
+        session_tokens += stats.tokens;
+        session_tool_calls += stats.tool_calls;
+        session_turns += 1;
+
+        print_usage(&stats);
+
+        if let Err(e) = save_session(&session_path, &messages) {
+            eprintln!("  {} session save: {}", style("⚠").yellow(), e);
+        }
     }
 
+    eprintln!();
+    eprintln!(
+        "  {} {} turns · {} tokens · {} tool calls",
+        style("session").dim(),
+        session_turns,
+        format_token_count(session_tokens),
+        session_tool_calls,
+    );
+    eprintln!();
     Ok(())
 }
 
-/// Run a single conversational turn with the ReAct loop.
-async fn run_turn(
-    messages: &mut Vec<ChatMessage>,
-    user_input: &str,
-    llm_client: &Arc<dyn agent_sdk::traits::llm_client::LlmClient>,
-    work_dir: &std::path::Path,
-    max_iterations: usize,
-    allow_all: bool,
-    event_tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
-) -> anyhow::Result<()> {
-    let tools = build_tools(work_dir, allow_all, llm_client.clone(), event_tx);
-    let tool_defs = tools.definitions();
-
-    messages.push(ChatMessage::user(user_input));
-
-    let mut total_tokens = 0u64;
-    let mut tool_calls_count = 0usize;
-
-    for _iteration in 0..max_iterations {
-        let (response, tokens) = llm_client.chat(messages, &tool_defs).await?;
-        total_tokens += tokens;
-
-        match response {
-            ChatMessage::Assistant { ref content, ref tool_calls } if !tool_calls.is_empty() => {
-                if let Some(text) = content {
-                    if !text.is_empty() {
-                        eprintln!(
-                            "  {} {}",
-                            style("thinking").yellow().bold(),
-                            style(truncate(text, 200)).dim(),
-                        );
-                    }
-                }
-
-                messages.push(response.clone());
-
-                for tc in tool_calls {
-                    let args_preview = truncate(&tc.function.arguments, 120);
-                    let is_team = tc.function.name == "spawn_agent_team";
-
-                    if is_team {
-                        eprintln!(
-                            "  {} {}",
-                            style("team").magenta().bold(),
-                            style("Spawning agent team...").magenta(),
-                        );
-                    } else {
-                        eprintln!(
-                            "  {} {} {}",
-                            style("tool").cyan().bold(),
-                            style(&tc.function.name).cyan(),
-                            style(&args_preview).dim(),
-                        );
-                    }
-
-                    let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or_default();
-
-                    let result = tools.execute(&tc.function.name, args).await;
-
-                    let result_content = match &result {
-                        Ok(val) => {
-                            let full = serde_json::to_string(val).unwrap_or_default();
-                            truncate_tool_result(&full)
-                        }
-                        Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
-                    };
-
-                    let preview = truncate(&result_content, 120);
-                    if is_team {
-                        eprintln!(
-                            "  {} {}",
-                            style("team").magenta().bold(),
-                            style(&preview).dim(),
-                        );
-                    } else {
-                        eprintln!(
-                            "  {} {}",
-                            style("  ↳").green().dim(),
-                            style(&preview).dim(),
-                        );
-                    }
-
-                    messages.push(ChatMessage::tool_result(&tc.id, &result_content));
-                    tool_calls_count += 1;
-                }
-            }
-            ChatMessage::Assistant { ref content, .. } => {
-                let answer = content.clone().unwrap_or_default();
-                messages.push(response);
-
-                println!("\n{}\n", answer);
-
-                eprintln!(
-                    "  {} tokens: {} | tool calls: {}",
-                    style("usage").dim(),
-                    style(total_tokens).dim(),
-                    style(tool_calls_count).dim(),
-                );
-                eprintln!();
-                return Ok(());
-            }
-            other => {
-                let text = other.text_content().unwrap_or("").to_string();
-                messages.push(other);
-                println!("\n{}\n", text);
-                return Ok(());
-            }
-        }
-    }
+fn print_usage(stats: &TurnStats) {
+    let duration = if stats.duration.as_secs() >= 60 {
+        format!("{}m{:.0}s", stats.duration.as_secs() / 60, stats.duration.as_secs() % 60)
+    } else {
+        format!("{:.1}s", stats.duration.as_secs_f64())
+    };
 
     eprintln!(
-        "  {} max iterations ({}) reached",
-        style("limit").yellow().bold(),
-        max_iterations,
+        "  {}",
+        style(format!(
+            "{} tokens · {} tool calls · {}",
+            format_token_count(stats.tokens),
+            stats.tool_calls,
+            duration,
+        ))
+        .dim(),
     );
-    Ok(())
-}
-
-fn read_input() -> io::Result<String> {
-    let stdin = io::stdin();
-    let mut line = String::new();
-    stdin.lock().read_line(&mut line)?;
-    Ok(line)
-}
-
-fn print_help() {
-    eprintln!();
-    eprintln!("  {}", style("Commands:").bold());
-    eprintln!("    {}    — Clear conversation history", style("/clear").cyan());
-    eprintln!("    {}      — Start a fresh session", style("/new").cyan());
-    eprintln!("    {}   — Show current session info", style("/status").cyan());
-    eprintln!("    {}   — Show this help", style("/help").cyan());
-    eprintln!("    {}   — Exit", style("/quit").cyan());
-    eprintln!();
-    eprintln!("  {}", style("Usage:").bold());
-    eprintln!("    agent [OPTIONS] [PROMPT]      One-shot mode");
-    eprintln!("    agent [OPTIONS]               Interactive REPL");
-    eprintln!("    agent --allow-all-commands     Allow any shell command");
-    eprintln!("    agent -p openai -m gpt-4o     Use OpenAI");
-    eprintln!("    agent --session /tmp/agent.json  Use a custom session file");
-    eprintln!();
-    eprintln!("  {}", style("Agent Teams:").bold());
-    eprintln!("    The agent automatically decides when to spawn a team.");
-    eprintln!("    Ask it to work on complex tasks with parallel components");
-    eprintln!("    and it will create teammates on its own.");
     eprintln!();
 }
 
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len])
-    }
-}
-
-const MAX_TOOL_RESULT_CHARS: usize = 12_000;
-
-fn truncate_tool_result(s: &str) -> String {
-    if s.len() <= MAX_TOOL_RESULT_CHARS {
-        return s.to_string();
-    }
-
-    if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(s) {
-        if let Some(content) = val.get_mut("content") {
-            if let Some(text) = content.as_str() {
-                if text.len() > MAX_TOOL_RESULT_CHARS - 200 {
-                    let limit = MAX_TOOL_RESULT_CHARS - 200;
-                    let truncated = format!(
-                        "{}...\n\n[truncated: {}/{} chars]",
-                        &text[..limit],
-                        limit,
-                        text.len()
-                    );
-                    *content = serde_json::Value::String(truncated);
-                    return serde_json::to_string(&val)
-                        .unwrap_or_else(|_| s[..MAX_TOOL_RESULT_CHARS].to_string());
-                }
+fn ctrlc_handler(interrupt: Arc<AtomicBool>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::signal::ctrl_c().await.ok();
+            if interrupt.load(Ordering::Relaxed) {
+                // Double Ctrl+C = force exit
+                eprintln!("\n  {}", style("Force exit.").red());
+                std::process::exit(130);
             }
+            interrupt.store(true, Ordering::Relaxed);
         }
-    }
-
-    format!(
-        "{}...[truncated: {}/{} chars]",
-        &s[..MAX_TOOL_RESULT_CHARS],
-        MAX_TOOL_RESULT_CHARS,
-        s.len()
-    )
-}
-
-fn short_agent_id(agent_id: &agent_sdk::error::AgentId) -> String {
-    agent_id.to_string().chars().take(8).collect()
-}
-
-fn format_teammate_tool_call(tool_name: &str, arguments: &str) -> String {
-    let args: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
-
-    match tool_name {
-        "read_file" => format!("Read {}", arg_as_path(&args, "path").unwrap_or("?")),
-        "list_directory" => format!("List {}", arg_as_path(&args, "path").unwrap_or("?")),
-        "write_file" => format!("Write {}", arg_as_path(&args, "path").unwrap_or("?")),
-        "search_files" => format!(
-            "Search {}",
-            arg_as_str(&args, "query")
-                .or_else(|| arg_as_str(&args, "pattern"))
-                .unwrap_or("files")
-        ),
-        "run_command" => format!(
-            "Run {}",
-            arg_as_str(&args, "command")
-                .or_else(|| arg_as_str(&args, "cmd"))
-                .unwrap_or("command")
-        ),
-        "list_completed_tasks" => "Tasks completed".to_string(),
-        "get_task_context" => format!(
-            "Task context {}",
-            arg_as_str(&args, "task_id").unwrap_or("?")
-        ),
-        "read_memory" => format!("Recall {}", arg_as_str(&args, "key").unwrap_or("?")),
-        "write_memory" => format!("Remember {}", arg_as_str(&args, "key").unwrap_or("?")),
-        "list_memory" => "List memory".to_string(),
-        _ => format!("{} {}", humanize_tool_name(tool_name), truncate(arguments, 80)),
-    }
-}
-
-fn arg_as_str<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
-    args.get(key).and_then(|v| v.as_str())
-}
-
-fn arg_as_path<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
-    arg_as_str(args, key).map(|p| if p.is_empty() { "/" } else { p })
-}
-
-fn humanize_tool_name(name: &str) -> String {
-    let mut out = String::new();
-    for (idx, part) in name.split('_').filter(|s| !s.is_empty()).enumerate() {
-        if idx > 0 {
-            out.push(' ');
-        }
-        let mut chars = part.chars();
-        if let Some(first) = chars.next() {
-            out.push(first.to_ascii_uppercase());
-            out.push_str(chars.as_str());
-        }
-    }
-    if out.is_empty() {
-        name.to_string()
-    } else {
-        out
-    }
+    });
 }

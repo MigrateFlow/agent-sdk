@@ -45,7 +45,9 @@ petgraph = "0.6"
 # CLI
 clap = { version = "4", features = ["derive"] }
 console = "0.15"
+indicatif = "0.17"
 dotenvy = "0.15"
+dirs = "5"
 
 [dev-dependencies]
 tempfile = "3"

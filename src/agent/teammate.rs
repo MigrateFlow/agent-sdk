@@ -105,7 +105,7 @@ impl Teammate {
                     match msg.kind {
                         MessageKind::Shutdown => {
                             info!(agent_id = %agent_id, "Received shutdown (immediate)");
-                            self.emit(AgentEvent::AgentShutdown { agent_id });
+                            self.emit(AgentEvent::AgentShutdown { agent_id, name: name.clone() });
                             return AgentResult {
                                 agent_id,
                                 name,
@@ -145,6 +145,7 @@ impl Teammate {
                                 let _ = self.ctx.broker.route(&reply);
                                 self.emit(AgentEvent::ShutdownRejected {
                                     agent_id,
+                                    name: name.clone(),
                                     reason: "Still processing tasks".to_string(),
                                 });
                             } else {
@@ -156,8 +157,8 @@ impl Teammate {
                                 )
                                 .in_reply_to(msg.id);
                                 let _ = self.ctx.broker.route(&reply);
-                                self.emit(AgentEvent::ShutdownAccepted { agent_id });
-                                self.emit(AgentEvent::AgentShutdown { agent_id });
+                                self.emit(AgentEvent::ShutdownAccepted { agent_id, name: name.clone() });
+                                self.emit(AgentEvent::AgentShutdown { agent_id, name: name.clone() });
                                 return AgentResult {
                                     agent_id,
                                     name,
@@ -204,6 +205,7 @@ impl Teammate {
 
                     self.emit(AgentEvent::TaskStarted {
                         agent_id,
+                        name: name.clone(),
                         task_id,
                         title: task.title.clone(),
                     });
@@ -255,6 +257,7 @@ impl Teammate {
 
                                 self.emit(AgentEvent::TaskCompleted {
                                     agent_id,
+                                    name: name.clone(),
                                     task_id,
                                     tokens_used: tokens,
                                     iterations,
@@ -284,6 +287,7 @@ impl Teammate {
 
                             self.emit(AgentEvent::TaskFailed {
                                 agent_id,
+                                name: name.clone(),
                                 task_id,
                                 error: e.to_string(),
                             });
@@ -342,6 +346,7 @@ impl Teammate {
 
                         self.emit(AgentEvent::TeammateIdle {
                             agent_id,
+                            name: name.clone(),
                             tasks_completed,
                         });
 
@@ -371,7 +376,7 @@ impl Teammate {
             tokio::time::sleep(Duration::from_millis(self.ctx.poll_interval_ms)).await;
         }
 
-        self.emit(AgentEvent::AgentShutdown { agent_id });
+        self.emit(AgentEvent::AgentShutdown { agent_id, name: name.clone() });
         AgentResult {
             agent_id,
             name,
@@ -400,6 +405,7 @@ impl Teammate {
 
             self.emit(AgentEvent::PlanSubmitted {
                 agent_id: self.ctx.agent_id,
+                name: self.ctx.name.clone(),
                 task_id: task.id,
                 plan_preview: truncate(&plan, 200),
             });
@@ -431,7 +437,8 @@ impl Teammate {
             system_prompt,
             self.ctx.max_loop_iterations,
         )
-        .with_max_context_tokens(self.ctx.max_context_tokens);
+        .with_max_context_tokens(self.ctx.max_context_tokens)
+        .with_agent_name(&self.ctx.name);
         let mut agent_loop = agent_loop;
 
         if let Some(ref tx) = self.ctx.event_tx {
@@ -476,6 +483,7 @@ impl Teammate {
                             info!(agent_id = %agent_id, task_id = %task.id, "Plan approved");
                             self.emit(AgentEvent::PlanApproved {
                                 agent_id,
+                                name: self.ctx.name.clone(),
                                 task_id: task.id,
                             });
                             return Ok(());
@@ -488,6 +496,7 @@ impl Teammate {
                             info!(agent_id = %agent_id, task_id = %task.id, "Plan rejected: {}", feedback);
                             self.emit(AgentEvent::PlanRejected {
                                 agent_id,
+                                name: self.ctx.name.clone(),
                                 task_id: task.id,
                                 feedback,
                             });

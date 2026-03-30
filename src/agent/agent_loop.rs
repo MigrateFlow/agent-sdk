@@ -11,7 +11,7 @@ use crate::tools::registry::ToolRegistry;
 use super::events::AgentEvent;
 
 const BYTES_PER_TOKEN: usize = 4;
-const DEFAULT_MAX_CONTEXT_TOKENS: usize = 100_000;
+const DEFAULT_MAX_CONTEXT_TOKENS: usize = 200_000;
 const MAX_TOOL_RESULT_CHARS: usize = 12_000;
 const COMPACT_KEEP_RECENT: usize = 10;
 
@@ -26,6 +26,7 @@ pub struct AgentLoopResult {
 
 pub struct AgentLoop {
     agent_id: AgentId,
+    agent_name: String,
     llm_client: Arc<dyn LlmClient>,
     tools: ToolRegistry,
     messages: Vec<ChatMessage>,
@@ -47,6 +48,7 @@ impl AgentLoop {
         let messages = vec![ChatMessage::system(system_prompt)];
         Self {
             agent_id,
+            agent_name: String::new(),
             llm_client,
             tools,
             messages,
@@ -64,6 +66,12 @@ impl AgentLoop {
         self
     }
 
+    /// Set a human-readable name for this agent (used in events).
+    pub fn with_agent_name(mut self, name: impl Into<String>) -> Self {
+        self.agent_name = name.into();
+        self
+    }
+
     /// Create an AgentLoop with existing conversation history (for multi-turn).
     pub fn with_messages(
         agent_id: AgentId,
@@ -74,6 +82,7 @@ impl AgentLoop {
     ) -> Self {
         Self {
             agent_id,
+            agent_name: String::new(),
             llm_client,
             tools,
             messages,
@@ -126,6 +135,7 @@ impl AgentLoop {
                         if !text.is_empty() {
                             self.emit(AgentEvent::Thinking {
                                 agent_id: self.agent_id,
+                                name: self.agent_name.clone(),
                                 content: truncate(text, 200),
                                 iteration,
                             });
@@ -137,6 +147,7 @@ impl AgentLoop {
                     for tool_call in tool_calls {
                         self.emit(AgentEvent::ToolCall {
                             agent_id: self.agent_id,
+                            name: self.agent_name.clone(),
                             tool_name: tool_call.function.name.clone(),
                             // Keep full arguments for event consumers so they can
                             // reliably extract fields like path/command.
@@ -165,6 +176,7 @@ impl AgentLoop {
 
                         self.emit(AgentEvent::ToolResult {
                             agent_id: self.agent_id,
+                            name: self.agent_name.clone(),
                             tool_name: tool_call.function.name.clone(),
                             result_preview: truncate(&result_content, 300),
                             iteration,

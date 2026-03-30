@@ -65,6 +65,8 @@ impl TeamLead {
         let mut registry = AgentRegistry::new();
         let mut total_tokens = 0u64;
         let mut agents_spawned = 0usize;
+        // Map agent IDs to human-readable names for event display.
+        let mut name_map = std::collections::HashMap::<AgentId, String>::new();
 
         let mut lead_mailbox = self.broker.team_lead_mailbox()?;
 
@@ -73,6 +75,7 @@ impl TeamLead {
             for spec in &self.teammate_specs {
                 match self.spawn_named_teammate(spec).await {
                     Ok(handle) => {
+                        name_map.insert(handle.agent_id, handle.name.clone());
                         self.emit(AgentEvent::TeammateSpawned {
                             agent_id: handle.agent_id,
                             name: handle.name.clone(),
@@ -91,6 +94,7 @@ impl TeamLead {
                 let name = format!("teammate-{}", i + 1);
                 match self.spawn_teammate(&name, String::new(), false).await {
                     Ok(handle) => {
+                        name_map.insert(handle.agent_id, handle.name.clone());
                         self.emit(AgentEvent::TeammateSpawned {
                             agent_id: handle.agent_id,
                             name: handle.name.clone(),
@@ -152,7 +156,7 @@ impl TeamLead {
                             }
                         }
                         MessageKind::PlanSubmission => {
-                            self.handle_plan_submission(&msg).await;
+                            self.handle_plan_submission(&msg, &name_map).await;
                         }
                         MessageKind::TeammateIdle => {
                             if let Ok(payload) =
@@ -212,6 +216,7 @@ impl TeamLead {
                 let name = format!("teammate-{}", agents_spawned + 1);
                 match self.spawn_teammate(&name, String::new(), false).await {
                     Ok(handle) => {
+                        name_map.insert(handle.agent_id, handle.name.clone());
                         self.emit(AgentEvent::TeammateSpawned {
                             agent_id: handle.agent_id,
                             name: handle.name.clone(),
@@ -240,6 +245,7 @@ impl TeamLead {
             let _ = self.broker.route(&shutdown);
             self.emit(AgentEvent::ShutdownRequested {
                 agent_id: *agent_id,
+                name: name_map.get(agent_id).cloned().unwrap_or_default(),
             });
         }
 
@@ -259,7 +265,7 @@ impl TeamLead {
         })
     }
 
-    async fn handle_plan_submission(&self, msg: &Envelope) {
+    async fn handle_plan_submission(&self, msg: &Envelope, name_map: &std::collections::HashMap<AgentId, String>) {
         let payload: PlanSubmissionPayload = match serde_json::from_value(msg.payload.clone()) {
             Ok(p) => p,
             Err(_) => return,
@@ -291,6 +297,7 @@ impl TeamLead {
             let _ = self.broker.route(&reply);
             self.emit(AgentEvent::PlanApproved {
                 agent_id: msg.from,
+                name: name_map.get(&msg.from).cloned().unwrap_or_default(),
                 task_id: payload.task_id,
             });
         } else {
@@ -310,6 +317,7 @@ impl TeamLead {
             let _ = self.broker.route(&reply);
             self.emit(AgentEvent::PlanRejected {
                 agent_id: msg.from,
+                name: name_map.get(&msg.from).cloned().unwrap_or_default(),
                 task_id: payload.task_id,
                 feedback,
             });

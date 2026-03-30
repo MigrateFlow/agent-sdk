@@ -150,7 +150,7 @@ let config = AgentConfig {
     poll_interval_ms: 200,
     max_task_retries: 3,
     max_loop_iterations: 50,
-    max_context_tokens: 100_000,
+    max_context_tokens: 200_000,
     max_idle_cycles: 50,
     plan_approval_timeout_secs: 300,
     command_timeout_secs: 30,
