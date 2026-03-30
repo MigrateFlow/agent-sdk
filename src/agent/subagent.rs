@@ -281,134 +281,64 @@ impl SubAgentRunner {
 
     /// Build the tool registry for a subagent, respecting allowed/disallowed lists.
     fn build_tools(&self, def: &SubAgentDef) -> ToolRegistry {
-        let mut all_tools: Vec<(String, Arc<dyn Tool>)> = Vec::new();
-
-        // Register all default tools
-        all_tools.push((
-            "read_file".to_string(),
-            Arc::new(ReadFileTool {
-                source_root: self.source_root.clone(),
-                work_dir: self.work_dir.clone(),
-            }),
-        ));
-        all_tools.push((
-            "write_file".to_string(),
-            Arc::new(WriteFileTool {
-                work_dir: self.work_dir.clone(),
-            }),
-        ));
-        all_tools.push((
-            "list_directory".to_string(),
-            Arc::new(ListDirectoryTool {
-                source_root: self.source_root.clone(),
-                work_dir: self.work_dir.clone(),
-            }),
-        ));
-        all_tools.push((
-            "search_files".to_string(),
-            Arc::new(SearchFilesTool {
-                source_root: self.source_root.clone(),
-            }),
-        ));
-        all_tools.push((
-            "web_search".to_string(),
-            Arc::new(WebSearchTool),
-        ));
-        all_tools.push((
-            "run_command".to_string(),
-            Arc::new(RunCommandTool::with_defaults(self.work_dir.clone())),
-        ));
-
         // NOTE: spawn_subagent and spawn_agent_team are intentionally NOT included.
         // Subagents cannot spawn other subagents (no nesting).
+        let all_tools: Vec<(String, Arc<dyn Tool>)> = vec![
+            (
+                "read_file".to_string(),
+                Arc::new(ReadFileTool {
+                    source_root: self.source_root.clone(),
+                    work_dir: self.work_dir.clone(),
+                }),
+            ),
+            (
+                "write_file".to_string(),
+                Arc::new(WriteFileTool {
+                    work_dir: self.work_dir.clone(),
+                }),
+            ),
+            (
+                "list_directory".to_string(),
+                Arc::new(ListDirectoryTool {
+                    source_root: self.source_root.clone(),
+                    work_dir: self.work_dir.clone(),
+                }),
+            ),
+            (
+                "search_files".to_string(),
+                Arc::new(SearchFilesTool {
+                    source_root: self.source_root.clone(),
+                }),
+            ),
+            (
+                "web_search".to_string(),
+                Arc::new(WebSearchTool),
+            ),
+            (
+                "run_command".to_string(),
+                Arc::new(RunCommandTool::with_defaults(self.work_dir.clone())),
+            ),
+        ];
+
+        let allowed_set: Option<std::collections::HashSet<&str>> =
+            if def.allowed_tools.is_empty() {
+                None
+            } else {
+                Some(def.allowed_tools.iter().map(|s| s.as_str()).collect())
+            };
+        let denied_set: std::collections::HashSet<&str> =
+            def.disallowed_tools.iter().map(|s| s.as_str()).collect();
 
         let mut registry = ToolRegistry::new();
-
-        // Apply allowed_tools filter (allowlist)
-        if !def.allowed_tools.is_empty() {
-            let allowed: std::collections::HashSet<&str> =
-                def.allowed_tools.iter().map(|s| s.as_str()).collect();
-            for (name, tool) in all_tools {
-                if allowed.contains(name.as_str()) {
-                    registry.register(tool);
-                }
-            }
-        } else {
-            // No allowlist — register all
-            for (_name, tool) in all_tools {
+        for (name, tool) in all_tools {
+            let pass_allow = match &allowed_set {
+                Some(set) => set.contains(name.as_str()),
+                None => true,
+            };
+            let pass_deny = !denied_set.contains(name.as_str());
+            if pass_allow && pass_deny {
                 registry.register(tool);
             }
-        }
-
-        // Apply disallowed_tools filter (denylist) — re-build if needed
-        if !def.disallowed_tools.is_empty() {
-            let denied: std::collections::HashSet<&str> =
-                def.disallowed_tools.iter().map(|s| s.as_str()).collect();
-            for tool_name in registry.tool_names() {
-                if !denied.contains(tool_name) {
-                    // We need to re-register — but ToolRegistry doesn't expose get().
-                    // Instead, rebuild from scratch with both filters applied.
-                    // This is a bit redundant but correct.
-                    let _ = tool_name; // handled below
-                }
-            }
-            // Rebuild with both filters
-            let mut final_registry = ToolRegistry::new();
-            let allowed_set: Option<std::collections::HashSet<&str>> =
-                if def.allowed_tools.is_empty() {
-                    None
-                } else {
-                    Some(def.allowed_tools.iter().map(|s| s.as_str()).collect())
-                };
-
-            let all_tools_again: Vec<(String, Arc<dyn Tool>)> = vec![
-                (
-                    "read_file".to_string(),
-                    Arc::new(ReadFileTool {
-                        source_root: self.source_root.clone(),
-                        work_dir: self.work_dir.clone(),
-                    }),
-                ),
-                (
-                    "write_file".to_string(),
-                    Arc::new(WriteFileTool {
-                        work_dir: self.work_dir.clone(),
-                    }),
-                ),
-                (
-                    "list_directory".to_string(),
-                    Arc::new(ListDirectoryTool {
-                        source_root: self.source_root.clone(),
-                        work_dir: self.work_dir.clone(),
-                    }),
-                ),
-                (
-                    "search_files".to_string(),
-                    Arc::new(SearchFilesTool {
-                        source_root: self.source_root.clone(),
-                    }),
-                ),
-                (
-                    "web_search".to_string(),
-                    Arc::new(WebSearchTool),
-                ),
-                (
-                    "run_command".to_string(),
-                    Arc::new(RunCommandTool::with_defaults(self.work_dir.clone())),
-                ),
-            ];
-
-            for (name, tool) in all_tools_again {
-                let pass_allow = match &allowed_set {
-                    Some(set) => set.contains(name.as_str()),
-                    None => true,
-                };
-                let pass_deny = !denied.contains(name.as_str());
-                if pass_allow && pass_deny {
-                    final_registry.register(tool);
-                }
-            }
-            return final_registry;
         }
 
         registry

@@ -11,6 +11,7 @@ use agent_sdk::tools::command_tools::RunCommandTool;
 use agent_sdk::tools::fs_tools::{ListDirectoryTool, ReadFileTool, WriteFileTool};
 use agent_sdk::tools::registry::ToolRegistry;
 use agent_sdk::tools::search_tools::SearchFilesTool;
+use agent_sdk::tools::subagent_tools::SpawnSubAgentTool;
 use agent_sdk::tools::team_tools::SpawnAgentTeamTool;
 use agent_sdk::tools::web_tools::WebSearchTool;
 use agent_sdk::traits::tool::{Tool, ToolDefinition};
@@ -221,6 +222,15 @@ fn format_tool_label(tool_name: &str, arguments: &str) -> String {
             format!("$ {}", style(short).white())
         }
         "spawn_agent_team" => "Spawning agent team…".to_string(),
+        "spawn_subagent" => {
+            let name = arg_str(&args, "name").unwrap_or("subagent");
+            let bg = args.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
+            if bg {
+                format!("Spawning subagent {} (background)…", style(name).white().bold())
+            } else {
+                format!("Spawning subagent {}…", style(name).white().bold())
+            }
+        }
         _ => {
             let name = humanize(tool_name);
             format!("{}", name)
@@ -275,6 +285,17 @@ fn format_result_preview(tool_name: &str, result: &str) -> String {
             let completed = val["tasks_completed"].as_u64().unwrap_or(0);
             let total = val["total_tasks"].as_u64().unwrap_or(0);
             format!("{} ({}/{} tasks)", status, completed, total)
+        }
+        "spawn_subagent" => {
+            let status = val["status"].as_str().unwrap_or("?");
+            let name = val["name"].as_str().unwrap_or("subagent");
+            let tokens = val["total_tokens"].as_u64().unwrap_or(0);
+            let tool_calls = val["tool_calls"].as_u64().unwrap_or(0);
+            if status == "background" {
+                format!("{} started in background", name)
+            } else {
+                format!("{} {} ({} tokens, {} tools)", name, status, format_token_count(tokens), tool_calls)
+            }
         }
         "update_task_list" => {
             let count = val["count"].as_u64().unwrap_or(0);
@@ -544,6 +565,7 @@ fn build_tools(
     llm_client: Arc<dyn agent_sdk::traits::llm_client::LlmClient>,
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
     tasks: Arc<Mutex<Vec<CliTask>>>,
+    subagent_registry: Arc<agent_sdk::SubAgentRegistry>,
 ) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
 
@@ -575,8 +597,16 @@ fn build_tools(
     registry.register(Arc::new(SpawnAgentTeamTool {
         work_dir: work_dir.to_path_buf(),
         source_root: work_dir.to_path_buf(),
+        llm_client: llm_client.clone(),
+        event_tx: event_tx.clone(),
+    }));
+
+    registry.register(Arc::new(SpawnSubAgentTool {
+        work_dir: work_dir.to_path_buf(),
+        source_root: work_dir.to_path_buf(),
         llm_client,
         event_tx,
+        registry: subagent_registry,
     }));
 
     registry.register(Arc::new(UpdateTaskListTool { tasks }));
@@ -688,6 +718,7 @@ async fn run_turn(
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
     tasks: Arc<Mutex<Vec<CliTask>>>,
     interrupt: Arc<AtomicBool>,
+    subagent_registry: Arc<agent_sdk::SubAgentRegistry>,
 ) -> anyhow::Result<TurnStats> {
     let tools = build_tools(
         work_dir,
@@ -695,6 +726,7 @@ async fn run_turn(
         llm_client.clone(),
         event_tx,
         tasks.clone(),
+        subagent_registry,
     );
     let tool_defs = tools.definitions();
     let started = Instant::now();
@@ -1149,6 +1181,39 @@ async fn main() -> anyhow::Result<()> {
                         style("done").dim(),
                     );
                 }
+                AgentEvent::SubAgentSpawned { ref name, .. } => {
+                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    eprintln!(
+                        "    {} {} {}",
+                        style("⎿").cyan(),
+                        style("subagent").dim(),
+                        style(name).fg(c).bold(),
+                    );
+                }
+                AgentEvent::SubAgentCompleted {
+                    ref name,
+                    tokens_used,
+                    tool_calls,
+                    ..
+                } => {
+                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    eprintln!(
+                        "    {} {} {} tokens · {} tools",
+                        name_tag(name, c),
+                        style("✓").green(),
+                        format_token_count(tokens_used),
+                        tool_calls,
+                    );
+                }
+                AgentEvent::SubAgentFailed { ref name, ref error, .. } => {
+                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    eprintln!(
+                        "    {} {} {}",
+                        name_tag(name, c),
+                        style("✗").red(),
+                        style(truncate(error, 60)).red().dim(),
+                    );
+                }
                 _ => {}
             }
         }
@@ -1162,6 +1227,15 @@ async fn main() -> anyhow::Result<()> {
     let session_path = cli
         .session
         .unwrap_or_else(|| default_session_path(&work_dir));
+
+    // ── Subagent registry with built-in definitions ──
+    let subagent_registry = {
+        let mut reg = agent_sdk::SubAgentRegistry::new();
+        for def in agent_sdk::agent::subagent::builtin_subagents() {
+            reg.register(def);
+        }
+        Arc::new(reg)
+    };
 
     // ── Ctrl+C handling ──
     let interrupt = Arc::new(AtomicBool::new(false));
@@ -1186,6 +1260,7 @@ async fn main() -> anyhow::Result<()> {
             Some(event_tx),
             tasks,
             interrupt,
+            subagent_registry,
         )
         .await?;
 
@@ -1330,6 +1405,7 @@ async fn main() -> anyhow::Result<()> {
             Some(event_tx.clone()),
             tasks.clone(),
             interrupt.clone(),
+            subagent_registry.clone(),
         )
         .await?;
 
