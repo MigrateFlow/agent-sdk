@@ -1,7 +1,9 @@
 use std::time::Duration;
+use std::process::Stdio;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 use tracing::debug;
 
 use crate::config::LlmConfig;
@@ -206,6 +208,7 @@ impl OpenAiClient {
         let base_url = config.resolve_base_url();
 
         let http = reqwest::Client::builder()
+            .http1_only()
             .timeout(Duration::from_secs(config.http_timeout_secs))
             .build()
             .map_err(|e| SdkError::Config(format!("Failed to create HTTP client: {}", e)))?;
@@ -226,6 +229,10 @@ impl OpenAiClient {
         messages: Vec<OaiMessage>,
         tools: Vec<OaiToolDef>,
     ) -> SdkResult<ChatCompletionResponse> {
+        if self.uses_dashscope_coding_plan() {
+            return self.send_chat_via_curl(messages, tools).await;
+        }
+
         self.rate_limiter.acquire().await;
 
         let tool_choice = if tools.is_empty() {
@@ -242,7 +249,7 @@ impl OpenAiClient {
             tool_choice,
         };
 
-        let url = format!("{}/v1/chat/completions", self.base_url);
+        let url = format!("{}/v1/chat/completions", self.normalized_base_url());
         let mut retries = 0u32;
 
         loop {
@@ -290,6 +297,100 @@ impl OpenAiClient {
                 });
             }
         }
+    }
+
+    fn uses_dashscope_coding_plan(&self) -> bool {
+        self.base_url.contains("coding-intl.dashscope.aliyuncs.com")
+    }
+
+    fn normalized_base_url(&self) -> &str {
+        self.base_url.strip_suffix("/v1").unwrap_or(&self.base_url)
+    }
+
+    async fn send_chat_via_curl(
+        &self,
+        messages: Vec<OaiMessage>,
+        tools: Vec<OaiToolDef>,
+    ) -> SdkResult<ChatCompletionResponse> {
+        self.rate_limiter.acquire().await;
+
+        let tool_choice = if tools.is_empty() {
+            None
+        } else {
+            Some("auto".to_string())
+        };
+
+        let request = ChatCompletionRequest {
+            model: self.model.clone(),
+            max_tokens: self.max_tokens,
+            messages,
+            tools,
+            tool_choice,
+        };
+
+        let url = format!("{}/v1/chat/completions", self.normalized_base_url());
+        let body = serde_json::to_vec(&request).map_err(SdkError::Serde)?;
+
+        let mut child = tokio::process::Command::new("curl")
+            .arg("--silent")
+            .arg("--show-error")
+            .arg("--http1.1")
+            .arg("--location")
+            .arg("--request")
+            .arg("POST")
+            .arg(&url)
+            .arg("--header")
+            .arg(format!("Authorization: Bearer {}", self.api_key))
+            .arg("--header")
+            .arg("Content-Type: application/json")
+            .arg("--data-binary")
+            .arg("@-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| SdkError::Config(format!("Failed to spawn curl: {}", e)))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(&body)
+                .await
+                .map_err(|e| SdkError::Config(format!("Failed to write curl request: {}", e)))?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .await
+            .map_err(|e| SdkError::Config(format!("curl execution failed: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(SdkError::LlmApi {
+                status: output.status.code().unwrap_or(0) as u16,
+                message: if stderr.is_empty() {
+                    "curl request failed".to_string()
+                } else {
+                    stderr
+                },
+            });
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let api_response: ChatCompletionResponse =
+            serde_json::from_str(&stdout).map_err(|e| {
+                SdkError::LlmResponseParse(format!(
+                    "Failed to parse Coding Plan OpenAI response: {}",
+                    e
+                ))
+            })?;
+
+        debug!(
+            model = ?api_response.model,
+            total_tokens = ?api_response.usage.as_ref().map(|u| u.total_tokens),
+            "OpenAI response received via curl transport"
+        );
+
+        Ok(api_response)
     }
 }
 

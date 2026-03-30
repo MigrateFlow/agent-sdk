@@ -1,7 +1,9 @@
 use std::time::Duration;
+use std::process::Stdio;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 use tracing::debug;
 
 use crate::config::LlmConfig;
@@ -222,6 +224,7 @@ impl ClaudeClient {
         let base_url = config.resolve_base_url();
 
         let http = reqwest::Client::builder()
+            .http1_only()
             .timeout(Duration::from_secs(config.http_timeout_secs))
             .build()
             .map_err(|e| SdkError::Config(format!("Failed to create HTTP client: {}", e)))?;
@@ -238,6 +241,10 @@ impl ClaudeClient {
     }
 
     async fn send_request(&self, request: &ApiRequest) -> SdkResult<ApiResponse> {
+        if self.uses_dashscope_coding_plan() {
+            return self.send_request_via_curl(request).await;
+        }
+
         self.rate_limiter.acquire().await;
 
         let url = format!("{}/v1/messages", self.base_url);
@@ -293,6 +300,80 @@ impl ClaudeClient {
                 });
             }
         }
+    }
+
+    fn uses_dashscope_coding_plan(&self) -> bool {
+        self.base_url.contains("coding-intl.dashscope.aliyuncs.com/apps/anthropic")
+    }
+
+    async fn send_request_via_curl(&self, request: &ApiRequest) -> SdkResult<ApiResponse> {
+        self.rate_limiter.acquire().await;
+
+        let url = format!("{}/v1/messages", self.base_url);
+        let body = serde_json::to_vec(request).map_err(SdkError::Serde)?;
+
+        let mut child = tokio::process::Command::new("curl")
+            .arg("--silent")
+            .arg("--show-error")
+            .arg("--http1.1")
+            .arg("--location")
+            .arg("--request")
+            .arg("POST")
+            .arg(&url)
+            .arg("--header")
+            .arg(format!("x-api-key: {}", self.api_key))
+            .arg("--header")
+            .arg(format!("anthropic-version: {}", ANTHROPIC_API_VERSION))
+            .arg("--header")
+            .arg("content-type: application/json")
+            .arg("--data-binary")
+            .arg("@-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| SdkError::Config(format!("Failed to spawn curl: {}", e)))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(&body)
+                .await
+                .map_err(|e| SdkError::Config(format!("Failed to write curl request: {}", e)))?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .await
+            .map_err(|e| SdkError::Config(format!("curl execution failed: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(SdkError::LlmApi {
+                status: output.status.code().unwrap_or(0) as u16,
+                message: if stderr.is_empty() {
+                    "curl request failed".to_string()
+                } else {
+                    stderr
+                },
+            });
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let api_response: ApiResponse = serde_json::from_str(&stdout).map_err(|e| {
+            SdkError::LlmResponseParse(format!(
+                "Failed to parse Coding Plan response: {}",
+                e
+            ))
+        })?;
+
+        debug!(
+            model = %api_response.model,
+            input_tokens = api_response.usage.input_tokens,
+            output_tokens = api_response.usage.output_tokens,
+            "Claude response received via curl transport"
+        );
+
+        Ok(api_response)
     }
 }
 

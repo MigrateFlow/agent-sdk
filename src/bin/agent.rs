@@ -1,5 +1,5 @@
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent_sdk::config::{LlmConfig, LlmProvider};
@@ -43,6 +43,10 @@ struct Cli {
     /// Allow all shell commands (no whitelist)
     #[arg(long)]
     allow_all_commands: bool,
+
+    /// Session file for interactive mode (defaults to <workdir>/.agent/cli-session.json)
+    #[arg(long)]
+    session: Option<PathBuf>,
 
     /// One-shot mode: run this prompt and exit
     prompt: Vec<String>,
@@ -93,6 +97,46 @@ fn build_tools(
     }));
 
     registry
+}
+
+fn default_session_path(work_dir: &Path) -> PathBuf {
+    work_dir.join(agent_sdk::config::AGENT_DIR).join("cli-session.json")
+}
+
+fn load_session(
+    session_path: &Path,
+    system_prompt: &str,
+) -> anyhow::Result<Option<Vec<ChatMessage>>> {
+    if !session_path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(session_path)?;
+    let messages: Vec<ChatMessage> = serde_json::from_str(&content)?;
+
+    let first_ok = matches!(
+        messages.first(),
+        Some(ChatMessage::System { content }) if content == system_prompt
+    );
+
+    if !first_ok {
+        return Ok(None);
+    }
+
+    Ok(Some(messages))
+}
+
+fn save_session(session_path: &Path, messages: &[ChatMessage]) -> anyhow::Result<()> {
+    if let Some(parent) = session_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_string_pretty(messages)?;
+    std::fs::write(session_path, content)?;
+    Ok(())
+}
+
+fn fresh_session(system_prompt: &str) -> Vec<ChatMessage> {
+    vec![ChatMessage::system(system_prompt)]
 }
 
 #[tokio::main]
@@ -262,13 +306,34 @@ async fn main() -> anyhow::Result<()> {
         style(&model).white(),
         style(work_dir.display()).dim(),
     );
-    eprintln!(
-        "{}",
-        style("  Type your message, press Enter to send. Ctrl+C to exit.").dim()
-    );
+    let session_path = cli
+        .session
+        .clone()
+        .unwrap_or_else(|| default_session_path(&work_dir));
+
+    eprintln!("{}", style("  Type your message, press Enter to send. Ctrl+C to exit.").dim());
     eprintln!();
 
-    let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(&system_prompt)];
+    let mut messages = if cli.prompt.is_empty() {
+        match load_session(&session_path, &system_prompt)? {
+            Some(messages) => {
+                eprintln!(
+                    "{} {} ({})",
+                    style("session").green().bold(),
+                    style("restored conversation").green(),
+                    style(format!("{} messages", messages.len())).dim(),
+                );
+                messages
+            }
+            None => {
+                let fresh = fresh_session(&system_prompt);
+                save_session(&session_path, &fresh)?;
+                fresh
+            }
+        }
+    } else {
+        fresh_session(&system_prompt)
+    };
 
     // One-shot mode
     if !cli.prompt.is_empty() {
@@ -300,13 +365,24 @@ async fn main() -> anyhow::Result<()> {
 
         match input.as_str() {
             "/quit" | "/exit" | "/q" => break,
-            "/clear" => {
-                messages = vec![ChatMessage::system(&system_prompt)];
+            "/clear" | "/new" => {
+                messages = fresh_session(&system_prompt);
+                save_session(&session_path, &messages)?;
                 eprintln!("{}", style("  Conversation cleared.").dim());
                 continue;
             }
             "/help" => {
                 print_help();
+                continue;
+            }
+            "/status" => {
+                eprintln!(
+                    "  {} {} | {} {}",
+                    style("session").green().bold(),
+                    style(session_path.display()).dim(),
+                    style("messages").green().bold(),
+                    style(messages.len()).dim(),
+                );
                 continue;
             }
             _ => {}
@@ -322,6 +398,8 @@ async fn main() -> anyhow::Result<()> {
             Some(event_tx.clone()),
         )
         .await?;
+
+        save_session(&session_path, &messages)?;
     }
 
     Ok(())
@@ -455,7 +533,9 @@ fn read_input() -> io::Result<String> {
 fn print_help() {
     eprintln!();
     eprintln!("  {}", style("Commands:").bold());
-    eprintln!("    {}  — Clear conversation history", style("/clear").cyan());
+    eprintln!("    {}    — Clear conversation history", style("/clear").cyan());
+    eprintln!("    {}      — Start a fresh session", style("/new").cyan());
+    eprintln!("    {}   — Show current session info", style("/status").cyan());
     eprintln!("    {}   — Show this help", style("/help").cyan());
     eprintln!("    {}   — Exit", style("/quit").cyan());
     eprintln!();
@@ -464,6 +544,7 @@ fn print_help() {
     eprintln!("    agent [OPTIONS]               Interactive REPL");
     eprintln!("    agent --allow-all-commands     Allow any shell command");
     eprintln!("    agent -p openai -m gpt-4o     Use OpenAI");
+    eprintln!("    agent --session /tmp/agent.json  Use a custom session file");
     eprintln!();
     eprintln!("  {}", style("Agent Teams:").bold());
     eprintln!("    The agent automatically decides when to spawn a team.");

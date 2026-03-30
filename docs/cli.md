@@ -31,6 +31,7 @@ cargo run --bin agent
     --max-tokens <TOKENS>          default 16384
     --max-iterations <N>           default 50
     --system <PROMPT>              override system prompt
+    --session <PATH>               custom REPL session file
     --allow-all-commands           disable command allowlist
 ```
 
@@ -40,6 +41,7 @@ Examples:
 cargo run --bin agent -- -p openai -m gpt-4o
 cargo run --bin agent -- -d /path/to/repo "review the main module"
 cargo run --bin agent -- --allow-all-commands "run the exact debug command you need"
+cargo run --bin agent -- --session /tmp/agent-session.json
 ```
 
 ## Environment Resolution
@@ -104,11 +106,20 @@ Interactive mode supports:
 
 - `/help`
 - `/clear`
+- `/new`
+- `/status`
 - `/quit`
 - `/exit`
 - `/q`
 
-`/clear` resets the conversation back to the system prompt only.
+Session behavior:
+
+- interactive mode now persists conversation history by default at `<workdir>/.agent/cli-session.json`
+- restarting the CLI in the same working directory resumes that conversation if the system prompt matches
+- `/clear` and `/new` both reset the session back to the system prompt only
+- `/status` shows the active session file and current message count
+
+One-shot mode still uses a fresh in-memory conversation and exits when the prompt completes.
 
 ## Team Spawning From The CLI
 
