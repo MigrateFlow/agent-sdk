@@ -53,24 +53,35 @@ impl TaskStore {
     pub fn try_claim_next(
         &self,
         agent_id: AgentId,
+        agent_name: &str,
         completed_task_ids: &[TaskId],
     ) -> SdkResult<Option<Task>> {
         let pending_dir = self.tasks_dir().join("pending");
 
-        let mut entries: Vec<_> = std::fs::read_dir(&pending_dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map(|ext| ext == "json")
-                    .unwrap_or(false)
-            })
-            .collect();
-
-        entries.sort_by_key(|e| e.file_name());
-
-        for entry in entries {
+        let mut candidates: Vec<(u32, chrono::DateTime<Utc>, PathBuf)> = Vec::new();
+        for entry in std::fs::read_dir(&pending_dir)? {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
             let path = entry.path();
+            if path.extension().map(|ext| ext == "json").unwrap_or(false) {
+                let content = match std::fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let task: Task = match serde_json::from_str(&content) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                candidates.push((task.priority, task.created_at, path));
+            }
+        }
+
+        // Lower priority value means higher priority.
+        candidates.sort_by_key(|(priority, created_at, _)| (*priority, *created_at));
+
+        for (_, _, path) in candidates {
             let task_id_str = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
             let task_id: TaskId = match task_id_str.parse() {
                 Ok(id) => id,
@@ -94,6 +105,13 @@ impl TaskStore {
             if !deps_resolved {
                 drop(lock);
                 continue;
+            }
+
+            if let Some(assignee) = assigned_teammate(&task.context) {
+                if assignee != agent_name {
+                    drop(lock);
+                    continue;
+                }
             }
 
             task.status = TaskStatus::Claimed {
@@ -279,6 +297,10 @@ impl TaskStore {
             failed: self.list_tasks_in_dir("failed")?.len(),
         })
     }
+}
+
+fn assigned_teammate(context: &serde_json::Value) -> Option<&str> {
+    context.get("assigned_teammate").and_then(|v| v.as_str())
 }
 
 #[derive(Debug, Clone)]

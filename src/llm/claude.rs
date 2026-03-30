@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::config::LlmConfig;
 use crate::error::{SdkError, SdkResult};
@@ -11,6 +11,9 @@ use crate::traits::llm_client::LlmClient;
 use crate::traits::tool::ToolDefinition;
 
 use super::rate_limiter::RateLimiter;
+use super::retry::{RetryConfig, handle_retryable_status};
+
+const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 
 pub struct ClaudeClient {
     http: reqwest::Client,
@@ -19,6 +22,7 @@ pub struct ClaudeClient {
     max_tokens: usize,
     base_url: String,
     rate_limiter: RateLimiter,
+    retry_config: RetryConfig,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -218,7 +222,7 @@ impl ClaudeClient {
         let base_url = config.resolve_base_url();
 
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
+            .timeout(Duration::from_secs(config.http_timeout_secs))
             .build()
             .map_err(|e| SdkError::Config(format!("Failed to create HTTP client: {}", e)))?;
 
@@ -229,6 +233,7 @@ impl ClaudeClient {
             max_tokens: config.max_tokens,
             base_url,
             rate_limiter: RateLimiter::new(config.requests_per_minute),
+            retry_config: RetryConfig::from_llm_config(config),
         })
     }
 
@@ -237,14 +242,13 @@ impl ClaudeClient {
 
         let url = format!("{}/v1/messages", self.base_url);
         let mut retries = 0u32;
-        let max_retries = 3;
 
         loop {
             let response = self
                 .http
                 .post(&url)
                 .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
+                .header("anthropic-version", ANTHROPIC_API_VERSION)
                 .header("content-type", "application/json")
                 .json(request)
                 .send()
@@ -256,56 +260,37 @@ impl ClaudeClient {
 
             let status = response.status().as_u16();
 
-            match status {
-                200 => {
-                    let api_response: ApiResponse =
-                        response.json().await.map_err(|e| {
-                            SdkError::LlmResponseParse(format!(
-                                "Failed to parse response: {}",
-                                e
-                            ))
-                        })?;
-                    debug!(
-                        model = %api_response.model,
-                        input_tokens = api_response.usage.input_tokens,
-                        output_tokens = api_response.usage.output_tokens,
-                        "Claude response received"
-                    );
-                    return Ok(api_response);
-                }
-                429 => {
-                    if retries >= max_retries {
-                        return Err(SdkError::RateLimited {
-                            retry_after_ms: 60000,
-                        });
-                    }
-                    let wait = Duration::from_millis(1000 * 2u64.pow(retries));
-                    warn!(retry = retries, wait_ms = ?wait, "Rate limited, backing off");
-                    tokio::time::sleep(wait).await;
-                    retries += 1;
-                }
-                529 => {
-                    if retries >= max_retries {
-                        return Err(SdkError::LlmApi {
-                            status,
-                            message: "API overloaded".to_string(),
-                        });
-                    }
-                    let wait = Duration::from_secs(30);
-                    warn!(retry = retries, "API overloaded, waiting 30s");
-                    tokio::time::sleep(wait).await;
-                    retries += 1;
-                }
-                _ => {
-                    let body = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    return Err(SdkError::LlmApi {
-                        status,
-                        message: body,
-                    });
-                }
+            if status == 200 {
+                let api_response: ApiResponse =
+                    response.json().await.map_err(|e| {
+                        SdkError::LlmResponseParse(format!(
+                            "Failed to parse response: {}",
+                            e
+                        ))
+                    })?;
+                debug!(
+                    model = %api_response.model,
+                    input_tokens = api_response.usage.input_tokens,
+                    output_tokens = api_response.usage.output_tokens,
+                    "Claude response received"
+                );
+                return Ok(api_response);
+            }
+
+            // For non-200, try the shared retry handler.  If the status is
+            // not retryable it returns an error with the body we already
+            // consumed, so read the body first for unknown statuses.
+            if matches!(status, 429 | 529 | 500 | 502 | 503) {
+                handle_retryable_status(status, &mut retries, &self.retry_config).await?;
+            } else {
+                let body = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unknown error".to_string());
+                return Err(SdkError::LlmApi {
+                    status,
+                    message: body,
+                });
             }
         }
     }

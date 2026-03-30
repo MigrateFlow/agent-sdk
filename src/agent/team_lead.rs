@@ -89,7 +89,7 @@ impl TeamLead {
             let initial_count = self.config.max_parallel_agents;
             for i in 0..initial_count {
                 let name = format!("teammate-{}", i + 1);
-                match self.spawn_teammate(&name, false).await {
+                match self.spawn_teammate(&name, String::new(), false).await {
                     Ok(handle) => {
                         self.emit(AgentEvent::TeammateSpawned {
                             agent_id: handle.agent_id,
@@ -210,7 +210,7 @@ impl TeamLead {
                 && (summary.pending > 0)
             {
                 let name = format!("teammate-{}", agents_spawned + 1);
-                match self.spawn_teammate(&name, false).await {
+                match self.spawn_teammate(&name, String::new(), false).await {
                     Ok(handle) => {
                         self.emit(AgentEvent::TeammateSpawned {
                             agent_id: handle.agent_id,
@@ -244,10 +244,8 @@ impl TeamLead {
         }
 
         let final_results = registry.wait_all().await;
-        for result in final_results {
-            if let Ok(r) = result {
-                total_tokens += r.total_tokens_used;
-            }
+        for result in final_results.into_iter().flatten() {
+            total_tokens += result.total_tokens_used;
         }
 
         let final_summary = self.task_store.summary()?;
@@ -273,15 +271,9 @@ impl TeamLead {
             "Reviewing teammate plan"
         );
 
-        let review_prompt = format!(
-            "A teammate submitted this implementation plan for task '{}'.\n\n\
-             Plan:\n{}\n\n\
-             Evaluate this plan. If it's reasonable and complete, respond with exactly: APPROVED\n\
-             If it needs changes, respond with: REJECTED: <your feedback>",
-            payload.task_id, payload.plan
-        );
+        let review_prompt = crate::prompts::plan_review_user_prompt(&payload.task_id, &payload.plan);
 
-        let decision = match self.llm_client.ask("You are a technical lead reviewing implementation plans.", &review_prompt).await {
+        let decision = match self.llm_client.ask(crate::prompts::plan_review_system_prompt(), &review_prompt).await {
             Ok((response, _)) => response,
             Err(e) => {
                 warn!(error = %e, "Failed to review plan, auto-approving");
@@ -327,6 +319,7 @@ impl TeamLead {
     async fn spawn_teammate(
         &self,
         name: &str,
+        role_prompt: String,
         require_plan_approval: bool,
     ) -> SdkResult<AgentHandle> {
         let agent_id = Uuid::new_v4();
@@ -335,6 +328,7 @@ impl TeamLead {
         let ctx = AgentContext {
             agent_id,
             name: name.to_string(),
+            role_prompt,
             task_store: self.task_store.clone(),
             broker: self.broker.clone(),
             llm_client: self.llm_client.clone(),
@@ -344,6 +338,9 @@ impl TeamLead {
             poll_interval_ms: self.config.poll_interval_ms,
             memory_store: self.memory_store.clone(),
             max_loop_iterations: self.config.max_loop_iterations,
+            max_context_tokens: self.config.max_context_tokens,
+            max_idle_cycles: self.config.max_idle_cycles,
+            plan_approval_timeout_secs: self.config.plan_approval_timeout_secs,
             event_tx: self.event_tx.clone(),
             require_plan_approval,
             hooks: self.hooks.clone(),
@@ -362,7 +359,11 @@ impl TeamLead {
     }
 
     async fn spawn_named_teammate(&self, spec: &TeammateSpec) -> SdkResult<AgentHandle> {
-        self.spawn_teammate(&spec.name, spec.require_plan_approval)
+        self.spawn_teammate(
+            &spec.name,
+            spec.prompt.clone(),
+            spec.require_plan_approval,
+        )
             .await
     }
 

@@ -82,7 +82,7 @@ impl Teammate {
         let mut tasks_failed = 0;
         let mut total_tokens = 0u64;
         let mut idle_cycles = 0u32;
-        let max_idle_cycles = 50;
+        let max_idle_cycles = self.ctx.max_idle_cycles;
 
         let mut mailbox = match self.ctx.broker.agent_mailbox(agent_id) {
             Ok(m) => m,
@@ -119,7 +119,12 @@ impl Teammate {
                             let has_work = self.ctx.task_store
                                 .completed_task_ids()
                                 .map(|ids| {
-                                    self.ctx.task_store.try_claim_next(agent_id, &ids).ok().flatten().is_some()
+                                    self.ctx
+                                        .task_store
+                                        .try_claim_next(agent_id, &self.ctx.name, &ids)
+                                        .ok()
+                                        .flatten()
+                                        .is_some()
                                 })
                                 .unwrap_or(false);
 
@@ -187,7 +192,11 @@ impl Teammate {
                 }
             };
 
-            match self.ctx.task_store.try_claim_next(agent_id, &completed_ids) {
+            match self
+                .ctx
+                .task_store
+                .try_claim_next(agent_id, &self.ctx.name, &completed_ids)
+            {
                 Ok(Some(task)) => {
                     idle_cycles = 0;
                     let task_id = task.id;
@@ -375,11 +384,14 @@ impl Teammate {
     async fn process_task(&self, task: &Task) -> SdkResult<(TaskResult, u64)> {
         let base_tools = self.build_tool_registry();
         let tools = self.ctx.prompt_builder.customize_tools(task, base_tools);
-        let system_prompt = self.ctx.prompt_builder.build_system_prompt(
+        let mut system_prompt = self.ctx.prompt_builder.build_system_prompt(
             task,
             &self.ctx.source_root,
             &self.ctx.work_dir,
         );
+        if !self.ctx.role_prompt.trim().is_empty() {
+            system_prompt.push_str(&crate::prompts::teammate_role_suffix(&self.ctx.role_prompt));
+        }
         let user_message = self.ctx.prompt_builder.build_user_message(task);
 
         // --- Plan mode: if required, first generate a plan, wait for approval ---
@@ -412,13 +424,15 @@ impl Teammate {
         }
 
         // --- Execute the task ---
-        let mut agent_loop = AgentLoop::new(
+        let agent_loop = AgentLoop::new(
             self.ctx.agent_id,
             self.ctx.llm_client.clone(),
             tools,
             system_prompt,
             self.ctx.max_loop_iterations,
-        );
+        )
+        .with_max_context_tokens(self.ctx.max_context_tokens);
+        let mut agent_loop = agent_loop;
 
         if let Some(ref tx) = self.ctx.event_tx {
             agent_loop.set_event_sink(tx.clone());
@@ -442,17 +456,7 @@ impl Teammate {
 
     /// Generate a read-only plan for a task (plan mode).
     async fn generate_plan(&self, task: &Task, system_prompt: &str) -> SdkResult<String> {
-        let plan_prompt = format!(
-            "{}\n\n## PLAN MODE\n\
-            You are in plan mode. Do NOT make any changes yet.\n\
-            Analyze the task and produce a detailed implementation plan:\n\
-            1. What files need to be read/created/modified\n\
-            2. The approach and key decisions\n\
-            3. Potential risks or edge cases\n\
-            4. Verification steps\n\n\
-            Task: {}\n{}",
-            system_prompt, task.title, task.description
-        );
+        let plan_prompt = crate::prompts::plan_mode_prompt(system_prompt, task);
 
         let (plan, _tokens) = self.ctx.llm_client.ask(&plan_prompt, &task.description).await?;
         Ok(plan)
@@ -462,7 +466,7 @@ impl Teammate {
     async fn wait_for_plan_decision(&self, task: &Task) -> SdkResult<()> {
         let agent_id = self.ctx.agent_id;
         let mut mailbox = self.ctx.broker.agent_mailbox(agent_id)?;
-        let max_wait = 300; // 5 min max wait
+        let max_wait = self.ctx.plan_approval_timeout_secs;
 
         for _ in 0..max_wait {
             if let Ok(messages) = mailbox.recv() {

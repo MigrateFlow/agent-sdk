@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+/// Well-known directory name used for team infrastructure (task store,
+/// mailbox, memory) inside the working directory.
+pub const AGENT_DIR: &str = ".agent";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LlmProvider {
@@ -20,6 +24,28 @@ pub struct LlmConfig {
     pub api_key: Option<String>,
     #[serde(default)]
     pub api_base_url: Option<String>,
+
+    /// HTTP request timeout in seconds (applies to each LLM API call).
+    #[serde(default = "default_http_timeout_secs")]
+    pub http_timeout_secs: u64,
+    /// Maximum number of automatic retries on transient errors (429, 5xx).
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    /// Base delay in milliseconds for exponential back-off on retries.
+    #[serde(default = "default_retry_base_delay_ms")]
+    pub retry_base_delay_ms: u64,
+}
+
+fn default_http_timeout_secs() -> u64 {
+    120
+}
+
+fn default_max_retries() -> u32 {
+    3
+}
+
+fn default_retry_base_delay_ms() -> u64 {
+    1000
 }
 
 impl LlmConfig {
@@ -68,6 +94,9 @@ impl Default for LlmConfig {
             tokens_per_minute: 80_000,
             api_key: None,
             api_base_url: None,
+            http_timeout_secs: default_http_timeout_secs(),
+            max_retries: default_max_retries(),
+            retry_base_delay_ms: default_retry_base_delay_ms(),
         }
     }
 }
@@ -81,6 +110,15 @@ pub struct AgentConfig {
     pub max_loop_iterations: usize,
     #[serde(default = "default_max_context_tokens")]
     pub max_context_tokens: usize,
+    /// How many consecutive idle polling cycles before a teammate exits.
+    #[serde(default = "default_max_idle_cycles")]
+    pub max_idle_cycles: u32,
+    /// Seconds a teammate will wait for plan approval before proceeding.
+    #[serde(default = "default_plan_approval_timeout_secs")]
+    pub plan_approval_timeout_secs: u64,
+    /// Default timeout in seconds for `run_command` tool invocations.
+    #[serde(default = "default_command_timeout_secs")]
+    pub command_timeout_secs: u64,
 }
 
 fn default_max_loop_iterations() -> usize {
@@ -91,14 +129,29 @@ fn default_max_context_tokens() -> usize {
     100_000
 }
 
+fn default_max_idle_cycles() -> u32 {
+    50
+}
+
+fn default_plan_approval_timeout_secs() -> u64 {
+    300
+}
+
+fn default_command_timeout_secs() -> u64 {
+    30
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             max_parallel_agents: 4,
             poll_interval_ms: 200,
             max_task_retries: 3,
-            max_loop_iterations: 50,
-            max_context_tokens: 100_000,
+            max_loop_iterations: default_max_loop_iterations(),
+            max_context_tokens: default_max_context_tokens(),
+            max_idle_cycles: default_max_idle_cycles(),
+            plan_approval_timeout_secs: default_plan_approval_timeout_secs(),
+            command_timeout_secs: default_command_timeout_secs(),
         }
     }
 }

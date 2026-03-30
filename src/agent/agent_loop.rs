@@ -11,6 +11,7 @@ use crate::tools::registry::ToolRegistry;
 use super::events::AgentEvent;
 
 const BYTES_PER_TOKEN: usize = 4;
+const DEFAULT_MAX_CONTEXT_TOKENS: usize = 100_000;
 const MAX_TOOL_RESULT_CHARS: usize = 12_000;
 const COMPACT_KEEP_RECENT: usize = 10;
 
@@ -50,11 +51,17 @@ impl AgentLoop {
             tools,
             messages,
             max_iterations,
-            max_context_chars: 100_000 * BYTES_PER_TOKEN,
+            max_context_chars: DEFAULT_MAX_CONTEXT_TOKENS * BYTES_PER_TOKEN,
             total_tokens: 0,
             tool_calls_count: 0,
             event_tx: None,
         }
+    }
+
+    /// Set the maximum context window size in tokens.
+    pub fn with_max_context_tokens(mut self, tokens: usize) -> Self {
+        self.max_context_chars = tokens * BYTES_PER_TOKEN;
+        self
     }
 
     /// Create an AgentLoop with existing conversation history (for multi-turn).
@@ -71,7 +78,7 @@ impl AgentLoop {
             tools,
             messages,
             max_iterations,
-            max_context_chars: 100_000 * BYTES_PER_TOKEN,
+            max_context_chars: DEFAULT_MAX_CONTEXT_TOKENS * BYTES_PER_TOKEN,
             total_tokens: 0,
             tool_calls_count: 0,
             event_tx: None,
@@ -131,7 +138,9 @@ impl AgentLoop {
                         self.emit(AgentEvent::ToolCall {
                             agent_id: self.agent_id,
                             tool_name: tool_call.function.name.clone(),
-                            arguments: truncate(&tool_call.function.arguments, 200),
+                            // Keep full arguments for event consumers so they can
+                            // reliably extract fields like path/command.
+                            arguments: tool_call.function.arguments.clone(),
                             iteration,
                         });
 
@@ -259,7 +268,7 @@ impl AgentLoop {
                 ChatMessage::Assistant {
                     content,
                     tool_calls,
-                } if content.as_ref().map_or(false, |c| c.len() > 500) => {
+                } if content.as_ref().is_some_and(|c| c.len() > 500) => {
                     let short = content.as_ref().map(|c| truncate(c, 200));
                     self.messages[i] = ChatMessage::Assistant {
                         content: short,

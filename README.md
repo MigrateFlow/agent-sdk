@@ -2,6 +2,8 @@
 
 Orchestrate teams of LLM-powered agents in Rust. Coordinate multiple agent instances working together — one session acts as the team lead, coordinating work and assigning tasks. Teammates work independently, each with its own context, and communicate directly with each other.
 
+Detailed usage docs live in [docs/README.md](/Users/ThangLT4/Desktop/code/rust-agent-sdk/docs/README.md).
+
 ## When to use agent teams
 
 Agent teams are most effective when parallel exploration adds real value:

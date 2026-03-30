@@ -49,46 +49,11 @@ struct Cli {
 }
 
 fn build_system_prompt(work_dir: &std::path::Path) -> String {
-    format!(
-        r#"You are an expert AI coding assistant with direct access to the filesystem and shell.
-
-## Environment
-- Working directory: {work_dir}
-- You can read, write, search files, and run commands
-
-## Available Tools
-- `read_file` — Read file contents (supports offset/max_lines for large files)
-- `write_file` — Write/create files in the working directory
-- `list_directory` — List directory contents
-- `search_files` — Search by glob pattern and/or content
-- `run_command` — Execute shell commands
-- `spawn_agent_team` — Spawn a team of parallel agents for complex tasks
-
-## Agent Teams
-When a task is complex and has independent parts that benefit from parallel work,
-use `spawn_agent_team` to create a team. Define teammates (with names and roles)
-and tasks (with descriptions and dependencies). The team works in parallel and
-reports back when done.
-
-Good candidates for agent teams:
-- Building multiple independent modules
-- Reviewing code from different angles (security, performance, tests)
-- Investigating a bug with competing hypotheses
-
-Do NOT use agent teams for simple tasks — handle those yourself directly.
-
-## Guidelines
-- Read files before modifying them
-- Write complete files, no placeholders
-- After writing code, verify it compiles/works using run_command
-- Be concise in your responses
-- When asked to make changes, do them directly — don't just explain"#,
-        work_dir = work_dir.display(),
-    )
+    agent_sdk::prompts::cli_system_prompt(work_dir)
 }
 
 fn build_tools(
-    work_dir: &PathBuf,
+    work_dir: &std::path::Path,
     allow_all: bool,
     llm_client: Arc<dyn agent_sdk::traits::llm_client::LlmClient>,
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
@@ -96,33 +61,33 @@ fn build_tools(
     let mut registry = ToolRegistry::new();
 
     registry.register(Arc::new(ReadFileTool {
-        source_root: work_dir.clone(),
-        work_dir: work_dir.clone(),
+        source_root: work_dir.to_path_buf(),
+        work_dir: work_dir.to_path_buf(),
     }));
     registry.register(Arc::new(WriteFileTool {
-        work_dir: work_dir.clone(),
+        work_dir: work_dir.to_path_buf(),
     }));
     registry.register(Arc::new(ListDirectoryTool {
-        source_root: work_dir.clone(),
-        work_dir: work_dir.clone(),
+        source_root: work_dir.to_path_buf(),
+        work_dir: work_dir.to_path_buf(),
     }));
     registry.register(Arc::new(SearchFilesTool {
-        source_root: work_dir.clone(),
+        source_root: work_dir.to_path_buf(),
     }));
 
     if allow_all {
         registry.register(Arc::new(RunCommandTool {
-            work_dir: work_dir.clone(),
+            work_dir: work_dir.to_path_buf(),
             allowed_commands: vec![],
         }));
     } else {
-        registry.register(Arc::new(RunCommandTool::with_defaults(work_dir.clone())));
+        registry.register(Arc::new(RunCommandTool::with_defaults(work_dir.to_path_buf())));
     }
 
     // Agent team tool — lets the LLM decide when to spawn a team
     registry.register(Arc::new(SpawnAgentTeamTool {
-        work_dir: work_dir.clone(),
-        source_root: work_dir.clone(),
+        work_dir: work_dir.to_path_buf(),
+        source_root: work_dir.to_path_buf(),
         llm_client,
         event_tx,
     }));
@@ -156,10 +121,8 @@ async fn main() -> anyhow::Result<()> {
         .map(|v| v.to_lowercase())
         .as_deref()
         == Ok("openai")
-    {
-        LlmProvider::OpenAi
-    } else if std::env::var("OPENAI_API_KEY").is_ok()
-        && std::env::var("ANTHROPIC_API_KEY").is_err()
+        || (std::env::var("OPENAI_API_KEY").is_ok()
+            && std::env::var("ANTHROPIC_API_KEY").is_err())
     {
         LlmProvider::OpenAi
     } else {
@@ -184,10 +147,7 @@ async fn main() -> anyhow::Result<()> {
         provider,
         model: model.clone(),
         max_tokens: cli.max_tokens,
-        requests_per_minute: 60,
-        tokens_per_minute: 200_000,
-        api_key: None,
-        api_base_url: None,
+        ..LlmConfig::default()
     };
 
     let llm_client = agent_sdk::llm::create_client(&llm_config)?;
@@ -218,6 +178,31 @@ async fn main() -> anyhow::Result<()> {
                         "  {} {}",
                         style("task").blue().bold(),
                         style(&title).blue(),
+                    );
+                }
+                AgentEvent::ToolCall {
+                    agent_id,
+                    tool_name,
+                    arguments,
+                    ..
+                } => {
+                    let short_id = short_agent_id(&agent_id);
+                    let label = format_teammate_tool_call(&tool_name, &arguments);
+                    eprintln!("  {} {}", style(short_id).magenta(), label);
+                }
+                AgentEvent::ToolResult {
+                    agent_id,
+                    tool_name,
+                    result_preview,
+                    ..
+                } => {
+                    let short_id = short_agent_id(&agent_id);
+                    let tool = humanize_tool_name(&tool_name);
+                    eprintln!(
+                        "  {} -> {} {}",
+                        style(short_id).magenta(),
+                        style(tool).dim(),
+                        result_preview
                     );
                 }
                 AgentEvent::TaskCompleted {
@@ -347,7 +332,7 @@ async fn run_turn(
     messages: &mut Vec<ChatMessage>,
     user_input: &str,
     llm_client: &Arc<dyn agent_sdk::traits::llm_client::LlmClient>,
-    work_dir: &PathBuf,
+    work_dir: &std::path::Path,
     max_iterations: usize,
     allow_all: bool,
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
@@ -365,35 +350,22 @@ async fn run_turn(
         total_tokens += tokens;
 
         match response {
-            ChatMessage::Assistant {
-                ref content,
-                ref tool_calls,
-            } if !tool_calls.is_empty() => {
-                // Show thinking
+            ChatMessage::Assistant { ref content, ref tool_calls } if !tool_calls.is_empty() => {
                 if let Some(text) = content {
                     if !text.is_empty() {
                         eprintln!(
                             "  {} {}",
-                            style("thinking").dim(),
-                            style(truncate(text, 200)).dim().italic(),
+                            style("thinking").yellow().bold(),
+                            style(truncate(text, 200)).dim(),
                         );
                     }
                 }
 
-                messages.push(response);
+                messages.push(response.clone());
 
-                // Execute each tool call
-                let pending_calls: Vec<_> = if let Some(ChatMessage::Assistant { tool_calls, .. }) =
-                    messages.last()
-                {
-                    tool_calls.clone()
-                } else {
-                    vec![]
-                };
-
-                for tc in &pending_calls {
+                for tc in tool_calls {
+                    let args_preview = truncate(&tc.function.arguments, 120);
                     let is_team = tc.function.name == "spawn_agent_team";
-                    let args_preview = truncate(&tc.function.arguments, 150);
 
                     if is_team {
                         eprintln!(
@@ -410,8 +382,7 @@ async fn run_turn(
                         );
                     }
 
-                    let args: serde_json::Value =
-                        serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                    let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or_default();
 
                     let result = tools.execute(&tc.function.name, args).await;
 
@@ -423,7 +394,6 @@ async fn run_turn(
                         Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
                     };
 
-                    // Show abbreviated result
                     let preview = truncate(&result_content, 120);
                     if is_team {
                         eprintln!(
@@ -444,7 +414,6 @@ async fn run_turn(
                 }
             }
             ChatMessage::Assistant { ref content, .. } => {
-                // Final answer
                 let answer = content.clone().unwrap_or_default();
                 messages.push(response);
 
@@ -543,4 +512,66 @@ fn truncate_tool_result(s: &str) -> String {
         MAX_TOOL_RESULT_CHARS,
         s.len()
     )
+}
+
+fn short_agent_id(agent_id: &agent_sdk::error::AgentId) -> String {
+    agent_id.to_string().chars().take(8).collect()
+}
+
+fn format_teammate_tool_call(tool_name: &str, arguments: &str) -> String {
+    let args: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+
+    match tool_name {
+        "read_file" => format!("Read {}", arg_as_path(&args, "path").unwrap_or("?")),
+        "list_directory" => format!("List {}", arg_as_path(&args, "path").unwrap_or("?")),
+        "write_file" => format!("Write {}", arg_as_path(&args, "path").unwrap_or("?")),
+        "search_files" => format!(
+            "Search {}",
+            arg_as_str(&args, "query")
+                .or_else(|| arg_as_str(&args, "pattern"))
+                .unwrap_or("files")
+        ),
+        "run_command" => format!(
+            "Run {}",
+            arg_as_str(&args, "command")
+                .or_else(|| arg_as_str(&args, "cmd"))
+                .unwrap_or("command")
+        ),
+        "list_completed_tasks" => "Tasks completed".to_string(),
+        "get_task_context" => format!(
+            "Task context {}",
+            arg_as_str(&args, "task_id").unwrap_or("?")
+        ),
+        "read_memory" => format!("Recall {}", arg_as_str(&args, "key").unwrap_or("?")),
+        "write_memory" => format!("Remember {}", arg_as_str(&args, "key").unwrap_or("?")),
+        "list_memory" => "List memory".to_string(),
+        _ => format!("{} {}", humanize_tool_name(tool_name), truncate(arguments, 80)),
+    }
+}
+
+fn arg_as_str<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    args.get(key).and_then(|v| v.as_str())
+}
+
+fn arg_as_path<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    arg_as_str(args, key).map(|p| if p.is_empty() { "/" } else { p })
+}
+
+fn humanize_tool_name(name: &str) -> String {
+    let mut out = String::new();
+    for (idx, part) in name.split('_').filter(|s| !s.is_empty()).enumerate() {
+        if idx > 0 {
+            out.push(' ');
+        }
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            out.push(first.to_ascii_uppercase());
+            out.push_str(chars.as_str());
+        }
+    }
+    if out.is_empty() {
+        name.to_string()
+    } else {
+        out
+    }
 }

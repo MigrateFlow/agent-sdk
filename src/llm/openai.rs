@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::config::LlmConfig;
 use crate::error::{SdkError, SdkResult};
@@ -11,6 +11,7 @@ use crate::traits::llm_client::LlmClient;
 use crate::traits::tool::ToolDefinition;
 
 use super::rate_limiter::RateLimiter;
+use super::retry::{RetryConfig, handle_retryable_status};
 
 pub struct OpenAiClient {
     http: reqwest::Client,
@@ -19,6 +20,7 @@ pub struct OpenAiClient {
     max_tokens: usize,
     base_url: String,
     rate_limiter: RateLimiter,
+    retry_config: RetryConfig,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -204,7 +206,7 @@ impl OpenAiClient {
         let base_url = config.resolve_base_url();
 
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
+            .timeout(Duration::from_secs(config.http_timeout_secs))
             .build()
             .map_err(|e| SdkError::Config(format!("Failed to create HTTP client: {}", e)))?;
 
@@ -215,6 +217,7 @@ impl OpenAiClient {
             max_tokens: config.max_tokens,
             base_url,
             rate_limiter: RateLimiter::new(config.requests_per_minute),
+            retry_config: RetryConfig::from_llm_config(config),
         })
     }
 
@@ -241,7 +244,6 @@ impl OpenAiClient {
 
         let url = format!("{}/v1/chat/completions", self.base_url);
         let mut retries = 0u32;
-        let max_retries = 3;
 
         loop {
             let response = self
@@ -259,55 +261,33 @@ impl OpenAiClient {
 
             let status = response.status().as_u16();
 
-            match status {
-                200 => {
-                    let api_response: ChatCompletionResponse =
-                        response.json().await.map_err(|e| {
-                            SdkError::LlmResponseParse(format!(
-                                "Failed to parse OpenAI response: {}",
-                                e
-                            ))
-                        })?;
-                    debug!(
-                        model = ?api_response.model,
-                        total_tokens = ?api_response.usage.as_ref().map(|u| u.total_tokens),
-                        "OpenAI response received"
-                    );
-                    return Ok(api_response);
-                }
-                429 => {
-                    if retries >= max_retries {
-                        return Err(SdkError::RateLimited {
-                            retry_after_ms: 60000,
-                        });
-                    }
-                    let wait = Duration::from_millis(1000 * 2u64.pow(retries));
-                    warn!(retry = retries, wait_ms = ?wait, "Rate limited, backing off");
-                    tokio::time::sleep(wait).await;
-                    retries += 1;
-                }
-                500 | 502 | 503 => {
-                    if retries >= max_retries {
-                        return Err(SdkError::LlmApi {
-                            status,
-                            message: "API server error".to_string(),
-                        });
-                    }
-                    let wait = Duration::from_secs(5 * (retries as u64 + 1));
-                    warn!(retry = retries, status, "Server error, backing off");
-                    tokio::time::sleep(wait).await;
-                    retries += 1;
-                }
-                _ => {
-                    let body = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    return Err(SdkError::LlmApi {
-                        status,
-                        message: body,
-                    });
-                }
+            if status == 200 {
+                let api_response: ChatCompletionResponse =
+                    response.json().await.map_err(|e| {
+                        SdkError::LlmResponseParse(format!(
+                            "Failed to parse OpenAI response: {}",
+                            e
+                        ))
+                    })?;
+                debug!(
+                    model = ?api_response.model,
+                    total_tokens = ?api_response.usage.as_ref().map(|u| u.total_tokens),
+                    "OpenAI response received"
+                );
+                return Ok(api_response);
+            }
+
+            if matches!(status, 429 | 500 | 502 | 503) {
+                handle_retryable_status(status, &mut retries, &self.retry_config).await?;
+            } else {
+                let body = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unknown error".to_string());
+                return Err(SdkError::LlmApi {
+                    status,
+                    message: body,
+                });
             }
         }
     }

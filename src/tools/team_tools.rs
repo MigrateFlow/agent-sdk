@@ -32,6 +32,15 @@ pub struct SpawnAgentTeamTool {
 struct TeamRequest {
     teammates: Vec<TeammateRequest>,
     tasks: Vec<TaskRequest>,
+    /// When true (default), the SDK automatically assigns tasks to teammates
+    /// based on name/role keyword matching.  Set to false to let teammates
+    /// claim tasks on a first-come basis.
+    #[serde(default = "default_true")]
+    auto_assign: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,6 +88,10 @@ impl Tool for SpawnAgentTeamTool {
                             "required": ["name", "role"]
                         }
                     },
+                    "auto_assign": {
+                        "type": "boolean",
+                        "description": "Auto-assign tasks to teammates by keyword matching (default: true). Set false to let teammates claim freely."
+                    },
                     "tasks": {
                         "type": "array",
                         "description": "Tasks for the team to work on",
@@ -113,10 +126,18 @@ impl Tool for SpawnAgentTeamTool {
         if request.tasks.is_empty() {
             return Ok(json!({ "error": "Must specify at least one task" }));
         }
+        if let Some(dupe) = duplicate_target_file(&request.tasks) {
+            return Ok(json!({
+                "error": format!(
+                    "Conflicting task ownership: multiple tasks target '{}'. Split work so each teammate owns different files.",
+                    dupe
+                )
+            }));
+        }
 
         // Set up team infrastructure in a hidden subdirectory,
         // but teammates write output to the actual work_dir.
-        let infra_dir = self.work_dir.join(".agent-team");
+        let infra_dir = self.work_dir.join(crate::config::AGENT_DIR);
         tokio::fs::create_dir_all(&infra_dir).await.map_err(SdkError::Io)?;
 
         let task_store = Arc::new(TaskStore::new(infra_dir.clone()));
@@ -128,15 +149,27 @@ impl Tool for SpawnAgentTeamTool {
         // Create tasks, resolving dependency indices to TaskIds
         let mut created_tasks: Vec<Task> = Vec::new();
         for (i, tr) in request.tasks.iter().enumerate() {
-            let deps: Vec<_> = tr
+            let mut deps: Vec<_> = tr
                 .depends_on
                 .iter()
                 .filter_map(|&idx| created_tasks.get(idx).map(|t| t.id))
                 .collect();
+            if deps.is_empty() && looks_like_integration_task(tr) {
+                deps = created_tasks.iter().map(|t| t.id).collect();
+            }
 
-            let task = Task::new(&tr.title, &tr.title, &tr.description, &tr.target_file)
+            let assigned_teammate = if request.auto_assign {
+                choose_assignee(tr, &request.teammates, i)
+            } else {
+                None
+            };
+
+            let mut task = Task::new(&tr.title, &tr.title, &tr.description, &tr.target_file)
                 .with_priority(tr.priority.max(i as u32))
                 .with_dependencies(deps);
+            if let Some(name) = assigned_teammate {
+                task = task.with_context(json!({ "assigned_teammate": name }));
+            }
 
             task_store.create_task(&task)?;
             created_tasks.push(task);
@@ -155,6 +188,17 @@ impl Tool for SpawnAgentTeamTool {
 
         let teammate_names: Vec<_> = teammate_specs.iter().map(|t| t.name.clone()).collect();
         let task_titles: Vec<_> = created_tasks.iter().map(|t| t.title.clone()).collect();
+        let task_assignments: Vec<_> = created_tasks
+            .iter()
+            .map(|t| {
+                json!({
+                    "title": t.title,
+                    "target_file": t.target_file,
+                    "assigned_teammate": t.context.get("assigned_teammate").and_then(|v| v.as_str()),
+                    "depends_on": t.dependencies,
+                })
+            })
+            .collect();
         let task_count = created_tasks.len();
         let teammate_count = teammate_specs.len();
 
@@ -184,6 +228,7 @@ impl Tool for SpawnAgentTeamTool {
                 "status": "completed",
                 "teammates": teammate_names,
                 "tasks": task_titles,
+                "task_assignments": task_assignments,
                 "total_tasks": summary.total_tasks,
                 "tasks_completed": summary.tasks_completed,
                 "tasks_failed": summary.tasks_failed,
@@ -198,4 +243,76 @@ impl Tool for SpawnAgentTeamTool {
             })),
         }
     }
+}
+
+fn choose_assignee(
+    task: &TaskRequest,
+    teammates: &[TeammateRequest],
+    task_index: usize,
+) -> Option<String> {
+    if teammates.is_empty() {
+        return None;
+    }
+
+    let task_text = format!(
+        "{} {} {}",
+        task.title.to_lowercase(),
+        task.description.to_lowercase(),
+        task.target_file.to_lowercase()
+    );
+
+    let mut best_score = 0usize;
+    let mut best_name: Option<String> = None;
+
+    for teammate in teammates {
+        let mut score = 0usize;
+        for token in teammate
+            .name
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .chain(teammate.role.split(|c: char| !c.is_ascii_alphanumeric()))
+        {
+            let token = token.to_lowercase();
+            if token.len() < 3 {
+                continue;
+            }
+            if task_text.contains(&token) {
+                score += 1;
+            }
+        }
+
+        if score > best_score {
+            best_score = score;
+            best_name = Some(teammate.name.clone());
+        }
+    }
+
+    if best_name.is_some() {
+        best_name
+    } else {
+        // Fallback to deterministic round-robin to keep teammates utilized.
+        Some(teammates[task_index % teammates.len()].name.clone())
+    }
+}
+
+fn looks_like_integration_task(task: &TaskRequest) -> bool {
+    let file = task.target_file.to_lowercase();
+    let title = task.title.to_lowercase();
+    let desc = task.description.to_lowercase();
+
+    file.ends_with("main.rs")
+        || title.contains("main")
+        || title.contains("entrypoint")
+        || desc.contains("wire")
+        || desc.contains("integrate")
+}
+
+fn duplicate_target_file(tasks: &[TaskRequest]) -> Option<String> {
+    let mut seen = std::collections::HashSet::<String>::new();
+    for task in tasks {
+        let key = task.target_file.trim().to_lowercase();
+        if !seen.insert(key.clone()) {
+            return Some(task.target_file.clone());
+        }
+    }
+    None
 }

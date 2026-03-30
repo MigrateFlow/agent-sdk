@@ -1,6 +1,7 @@
 pub mod claude;
 pub mod openai;
 pub mod rate_limiter;
+pub mod retry;
 pub mod util;
 
 use std::sync::Arc;

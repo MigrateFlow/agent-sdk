@@ -223,7 +223,7 @@ impl AgentTeam {
             task_store.create_task(task)?;
         }
 
-        let infra_dir = self.work_dir.join(".agent-team");
+        let infra_dir = self.work_dir.join(crate::config::AGENT_DIR);
         std::fs::create_dir_all(&infra_dir).map_err(crate::error::SdkError::Io)?;
         let broker = Arc::new(MessageBroker::new(infra_dir.join("mailbox"))?);
         let memory = Arc::new(MemoryStore::new(infra_dir.join("memory"))?);
@@ -281,11 +281,9 @@ impl AgentTeam {
             self.work_dir.clone(),
         )));
 
-        let system = format!(
-            "You are an expert coding assistant.\n\
-             Source: {}\nOutput: {}",
-            self.source_root.display(),
-            self.work_dir.display(),
+        let system = crate::prompts::single_agent_system_prompt(
+            &self.source_root,
+            &self.work_dir,
         );
 
         let mut agent = AgentLoop::new(

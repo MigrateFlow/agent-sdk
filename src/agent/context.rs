@@ -19,6 +19,8 @@ pub struct AgentContext {
     pub agent_id: AgentId,
     /// Human-readable name for this teammate (e.g. "security-reviewer").
     pub name: String,
+    /// Optional role instructions for this teammate.
+    pub role_prompt: String,
     pub task_store: Arc<TaskStore>,
     pub broker: Arc<MessageBroker>,
     pub llm_client: Arc<dyn LlmClient>,
@@ -28,6 +30,9 @@ pub struct AgentContext {
     pub poll_interval_ms: u64,
     pub memory_store: Arc<MemoryStore>,
     pub max_loop_iterations: usize,
+    pub max_context_tokens: usize,
+    pub max_idle_cycles: u32,
+    pub plan_approval_timeout_secs: u64,
     pub event_tx: Option<UnboundedSender<AgentEvent>>,
     /// If true, the teammate must submit a plan and get approval before implementing.
     pub require_plan_approval: bool,
