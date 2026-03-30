@@ -23,7 +23,7 @@ pub use agent::memory::MemoryStore;
 pub use agent::hooks::{Hook, HookEvent, HookResult, HookRegistry};
 pub use task::store::TaskStore;
 pub use mailbox::broker::MessageBroker;
-pub use traits::llm_client::LlmClient;
+pub use traits::llm_client::{LlmClient, StreamDelta};
 pub use traits::tool::{Tool, ToolDefinition};
 pub use types::chat::ChatMessage;
 pub use types::task::{Task, TaskResult, TaskStatus};

@@ -6,10 +6,12 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tracing::debug;
 
+use tokio::sync::mpsc;
+
 use crate::config::LlmConfig;
 use crate::error::{SdkError, SdkResult};
 use crate::types::chat::{ChatMessage, FunctionCall, ToolCall};
-use crate::traits::llm_client::LlmClient;
+use crate::traits::llm_client::{LlmClient, StreamDelta};
 use crate::traits::tool::ToolDefinition;
 
 use super::rate_limiter::RateLimiter;
@@ -99,6 +101,58 @@ struct OaiUsage {
     #[allow(dead_code)]
     completion_tokens: u64,
     total_tokens: u64,
+}
+
+// ─── SSE streaming types ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+struct StreamingChatCompletionRequest {
+    model: String,
+    max_tokens: usize,
+    messages: Vec<OaiMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<OaiToolDef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<String>,
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StreamOptions {
+    include_usage: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StreamChunk {
+    choices: Vec<StreamChoice>,
+    usage: Option<OaiUsage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StreamChoice {
+    delta: StreamDeltaMsg,
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StreamDeltaMsg {
+    content: Option<String>,
+    tool_calls: Option<Vec<StreamToolCallDelta>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StreamToolCallDelta {
+    index: usize,
+    id: Option<String>,
+    function: Option<StreamFunctionDelta>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StreamFunctionDelta {
+    name: Option<String>,
+    arguments: Option<String>,
 }
 
 fn chat_messages_to_oai(messages: &[ChatMessage]) -> Vec<OaiMessage> {
@@ -307,6 +361,328 @@ impl OpenAiClient {
         self.base_url.strip_suffix("/v1").unwrap_or(&self.base_url)
     }
 
+    async fn send_chat_stream(
+        &self,
+        messages: Vec<OaiMessage>,
+        tools: Vec<OaiToolDef>,
+        tx: &mpsc::UnboundedSender<StreamDelta>,
+    ) -> SdkResult<(ChatMessage, u64)> {
+        self.rate_limiter.acquire().await;
+
+        let tool_choice = if tools.is_empty() {
+            None
+        } else {
+            Some("auto".to_string())
+        };
+
+        let stream_options = if self.uses_dashscope_coding_plan() {
+            None
+        } else {
+            Some(StreamOptions { include_usage: true })
+        };
+
+        let request = StreamingChatCompletionRequest {
+            model: self.model.clone(),
+            max_tokens: self.max_tokens,
+            messages,
+            tools,
+            tool_choice,
+            stream: true,
+            stream_options,
+        };
+
+        let url = format!("{}/v1/chat/completions", self.normalized_base_url());
+
+        let response = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| SdkError::LlmApi {
+                status: 0,
+                message: format!("Streaming request failed: {}", e),
+            })?;
+
+        let status = response.status().as_u16();
+        if status != 200 {
+            let body = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(SdkError::LlmApi { status, message: body });
+        }
+
+        // Accumulate the response from SSE chunks
+        let mut content = String::new();
+        let mut tool_calls_map: Vec<(String, String, String)> = Vec::new(); // (id, name, args)
+        let mut total_tokens = 0u64;
+        let mut has_tool_calls = false;
+
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+
+        use futures_util::StreamExt;
+        while let Some(chunk_result) = stream.next().await {
+            let chunk_bytes = chunk_result.map_err(|e| SdkError::LlmApi {
+                status: 0,
+                message: format!("Stream read error: {}", e),
+            })?;
+
+            buffer.push_str(&String::from_utf8_lossy(&chunk_bytes));
+
+            // Process complete SSE lines from buffer
+            while let Some(line_end) = buffer.find('\n') {
+                let line = buffer[..line_end].trim().to_string();
+                buffer = buffer[line_end + 1..].to_string();
+
+                if line.is_empty() || line.starts_with(':') {
+                    continue;
+                }
+
+                let data = if let Some(d) = line.strip_prefix("data: ") {
+                    d.trim()
+                } else {
+                    continue;
+                };
+
+                if data == "[DONE]" {
+                    break;
+                }
+
+                let chunk: StreamChunk = match serde_json::from_str(data) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+                // Extract usage from the final chunk
+                if let Some(usage) = chunk.usage {
+                    total_tokens = usage.total_tokens;
+                }
+
+                for choice in &chunk.choices {
+                    // Text content delta
+                    if let Some(ref text) = choice.delta.content {
+                        if !text.is_empty() {
+                            content.push_str(text);
+                            if !has_tool_calls {
+                                let _ = tx.send(StreamDelta::Text(text.clone()));
+                            } else {
+                                let _ = tx.send(StreamDelta::Thinking(text.clone()));
+                            }
+                        }
+                    }
+
+                    // Tool call deltas
+                    if let Some(ref tc_deltas) = choice.delta.tool_calls {
+                        has_tool_calls = true;
+                        for tc_delta in tc_deltas {
+                            let idx = tc_delta.index;
+                            // Grow the map if needed
+                            while tool_calls_map.len() <= idx {
+                                tool_calls_map.push((String::new(), String::new(), String::new()));
+                            }
+                            if let Some(ref id) = tc_delta.id {
+                                if !id.is_empty() {
+                                    tool_calls_map[idx].0 = id.clone();
+                                }
+                            }
+                            if let Some(ref func) = tc_delta.function {
+                                if let Some(ref name) = func.name {
+                                    if !name.is_empty() {
+                                        tool_calls_map[idx].1 = name.clone();
+                                    }
+                                }
+                                if let Some(ref args) = func.arguments {
+                                    tool_calls_map[idx].2.push_str(args);
+                                }
+                            }
+                        }
+                    }
+
+                    // Check finish_reason for thinking text
+                    if choice.finish_reason.as_deref() == Some("tool_calls") && !content.is_empty() {
+                        // Content before tool calls was thinking text — already sent as Thinking
+                    }
+                }
+            }
+        }
+
+        // Build the final ChatMessage
+        let tool_calls: Vec<ToolCall> = tool_calls_map
+            .into_iter()
+            .filter(|(id, _, _)| !id.is_empty())
+            .map(|(id, name, arguments)| ToolCall {
+                id,
+                call_type: "function".to_string(),
+                function: FunctionCall { name, arguments },
+            })
+            .collect();
+
+        let msg = if tool_calls.is_empty() {
+            ChatMessage::Assistant {
+                content: if content.is_empty() { None } else { Some(content) },
+                tool_calls: vec![],
+            }
+        } else {
+            // When there are tool calls, content is "thinking" text
+            ChatMessage::Assistant {
+                content: if content.is_empty() { None } else { Some(content) },
+                tool_calls,
+            }
+        };
+
+        Ok((msg, total_tokens))
+    }
+
+    async fn send_chat_stream_via_curl(
+        &self,
+        messages: Vec<OaiMessage>,
+        tools: Vec<OaiToolDef>,
+        tx: &mpsc::UnboundedSender<StreamDelta>,
+    ) -> SdkResult<(ChatMessage, u64)> {
+        self.rate_limiter.acquire().await;
+
+        let tool_choice = if tools.is_empty() {
+            None
+        } else {
+            Some("auto".to_string())
+        };
+
+        let request = StreamingChatCompletionRequest {
+            model: self.model.clone(),
+            max_tokens: self.max_tokens,
+            messages,
+            tools,
+            tool_choice,
+            stream: true,
+            stream_options: None,
+        };
+
+        let url = format!("{}/v1/chat/completions", self.normalized_base_url());
+        let body = serde_json::to_vec(&request).map_err(SdkError::Serde)?;
+
+        let mut child = tokio::process::Command::new("curl")
+            .arg("--silent")
+            .arg("--show-error")
+            .arg("--http1.1")
+            .arg("--no-buffer")
+            .arg("--location")
+            .arg("--request")
+            .arg("POST")
+            .arg(&url)
+            .arg("--header")
+            .arg(format!("Authorization: Bearer {}", self.api_key))
+            .arg("--header")
+            .arg("Content-Type: application/json")
+            .arg("--data-binary")
+            .arg("@-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| SdkError::Config(format!("Failed to spawn curl: {}", e)))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(&body).await
+                .map_err(|e| SdkError::Config(format!("Failed to write curl request: {}", e)))?;
+        }
+
+        // Read stdout line by line for SSE parsing
+        let stdout = child.stdout.take()
+            .ok_or_else(|| SdkError::Config("No stdout from curl".to_string()))?;
+
+        let mut content = String::new();
+        let mut tool_calls_map: Vec<(String, String, String)> = Vec::new();
+        let mut total_tokens = 0u64;
+        let mut has_tool_calls = false;
+
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            let bytes_read = reader.read_line(&mut line).await
+                .map_err(|e| SdkError::Config(format!("Failed to read curl stdout: {}", e)))?;
+            if bytes_read == 0 { break; }
+
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with(':') { continue; }
+
+            let data = match trimmed.strip_prefix("data: ") {
+                Some(d) => d.trim(),
+                None => continue,
+            };
+
+            if data == "[DONE]" { break; }
+
+            let chunk: StreamChunk = match serde_json::from_str(data) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            if let Some(usage) = chunk.usage {
+                total_tokens = usage.total_tokens;
+            }
+
+            for choice in &chunk.choices {
+                if let Some(ref text) = choice.delta.content {
+                    if !text.is_empty() {
+                        content.push_str(text);
+                        if !has_tool_calls {
+                            let _ = tx.send(StreamDelta::Text(text.clone()));
+                        }
+                    }
+                }
+
+                if let Some(ref tc_deltas) = choice.delta.tool_calls {
+                    has_tool_calls = true;
+                    for tc_delta in tc_deltas {
+                        let idx = tc_delta.index;
+                        while tool_calls_map.len() <= idx {
+                            tool_calls_map.push((String::new(), String::new(), String::new()));
+                        }
+                        if let Some(ref id) = tc_delta.id {
+                            if !id.is_empty() {
+                                tool_calls_map[idx].0 = id.clone();
+                            }
+                        }
+                        if let Some(ref func) = tc_delta.function {
+                            if let Some(ref name) = func.name {
+                                if !name.is_empty() {
+                                    tool_calls_map[idx].1 = name.clone();
+                                }
+                            }
+                            if let Some(ref args) = func.arguments {
+                                tool_calls_map[idx].2.push_str(args);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Wait for curl to exit
+        let _ = child.wait().await;
+
+        let tool_calls: Vec<ToolCall> = tool_calls_map
+            .into_iter()
+            .filter(|(id, _, _)| !id.is_empty())
+            .map(|(id, name, arguments)| ToolCall {
+                id,
+                call_type: "function".to_string(),
+                function: FunctionCall { name, arguments },
+            })
+            .collect();
+
+        let msg = ChatMessage::Assistant {
+            content: if content.is_empty() { None } else { Some(content) },
+            tool_calls,
+        };
+
+        Ok((msg, total_tokens))
+    }
+
     async fn send_chat_via_curl(
         &self,
         messages: Vec<OaiMessage>,
@@ -445,5 +821,22 @@ impl LlmClient for OpenAiClient {
         let tokens = response.usage.map(|u| u.total_tokens).unwrap_or(0);
         let chat_msg = oai_message_to_chat(msg);
         Ok((chat_msg, tokens))
+    }
+
+    async fn chat_stream(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDefinition],
+        tx: mpsc::UnboundedSender<StreamDelta>,
+    ) -> SdkResult<(ChatMessage, u64)> {
+        let oai_messages = chat_messages_to_oai(messages);
+        let oai_tools = tool_defs_to_oai(tools);
+
+        // DashScope Coding Plan needs curl transport for streaming too
+        if self.uses_dashscope_coding_plan() {
+            return self.send_chat_stream_via_curl(oai_messages, oai_tools, &tx).await;
+        }
+
+        self.send_chat_stream(oai_messages, oai_tools, &tx).await
     }
 }

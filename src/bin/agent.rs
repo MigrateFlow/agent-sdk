@@ -16,7 +16,7 @@ use agent_sdk::tools::team_tools::SpawnAgentTeamTool;
 use agent_sdk::tools::web_tools::WebSearchTool;
 use agent_sdk::traits::tool::{Tool, ToolDefinition};
 use agent_sdk::types::chat::ChatMessage;
-use agent_sdk::AgentEvent;
+use agent_sdk::{AgentEvent, StreamDelta};
 use clap::Parser;
 use console::{style, Term};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -60,12 +60,40 @@ struct Cli {
     #[arg(long)]
     allow_all_commands: bool,
 
+    /// Output NDJSON events to stdout (for programmatic consumption)
+    #[arg(long)]
+    json: bool,
+
+    /// Comma-separated list of tools to enable (default: all)
+    #[arg(long, value_delimiter = ',')]
+    tools: Option<Vec<String>>,
+
     /// Session file path
     #[arg(long)]
     session: Option<PathBuf>,
 
     /// One-shot mode: run this prompt and exit
     prompt: Vec<String>,
+}
+
+// ─── NDJSON wire protocol ────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum NdjsonEvent {
+    Started { tools: Vec<String> },
+    Thinking { content: String, iteration: usize },
+    ToolCall { tool_call_id: String, tool_name: String, arguments: String, iteration: usize },
+    ToolResult { tool_call_id: String, tool_name: String, content: String, iteration: usize },
+    TextDelta { content: String },
+    Completed { final_content: String, tokens_used: u64, iterations: usize, tool_calls: usize },
+    Failed { error: String },
+}
+
+fn emit_ndjson(event: &NdjsonEvent) {
+    if let Ok(json) = serde_json::to_string(event) {
+        println!("{}", json);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -567,52 +595,78 @@ fn build_tools(
     tasks: Arc<Mutex<Vec<CliTask>>>,
     subagent_registry: Arc<agent_sdk::SubAgentRegistry>,
     background_tx: Option<tokio::sync::mpsc::UnboundedSender<agent_sdk::agent::agent_loop::BackgroundResult>>,
+    tool_filter: Option<&[String]>,
 ) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
 
-    registry.register(Arc::new(ReadFileTool {
-        source_root: work_dir.to_path_buf(),
-        work_dir: work_dir.to_path_buf(),
-    }));
-    registry.register(Arc::new(WriteFileTool {
-        work_dir: work_dir.to_path_buf(),
-    }));
-    registry.register(Arc::new(ListDirectoryTool {
-        source_root: work_dir.to_path_buf(),
-        work_dir: work_dir.to_path_buf(),
-    }));
-    registry.register(Arc::new(SearchFilesTool {
-        source_root: work_dir.to_path_buf(),
-    }));
-    registry.register(Arc::new(WebSearchTool));
+    let allowed = |name: &str| -> bool {
+        match &tool_filter {
+            None => true,
+            Some(filter) => filter.iter().any(|f| f == name),
+        }
+    };
 
-    if allow_all {
-        registry.register(Arc::new(RunCommandTool {
+    if allowed("read_file") {
+        registry.register(Arc::new(ReadFileTool {
+            source_root: work_dir.to_path_buf(),
             work_dir: work_dir.to_path_buf(),
-            allowed_commands: vec![],
         }));
-    } else {
-        registry.register(Arc::new(RunCommandTool::with_defaults(work_dir.to_path_buf())));
+    }
+    if allowed("write_file") {
+        registry.register(Arc::new(WriteFileTool {
+            work_dir: work_dir.to_path_buf(),
+        }));
+    }
+    if allowed("list_directory") {
+        registry.register(Arc::new(ListDirectoryTool {
+            source_root: work_dir.to_path_buf(),
+            work_dir: work_dir.to_path_buf(),
+        }));
+    }
+    if allowed("search_files") {
+        registry.register(Arc::new(SearchFilesTool {
+            source_root: work_dir.to_path_buf(),
+        }));
+    }
+    if allowed("web_search") {
+        registry.register(Arc::new(WebSearchTool));
     }
 
-    registry.register(Arc::new(SpawnAgentTeamTool {
-        work_dir: work_dir.to_path_buf(),
-        source_root: work_dir.to_path_buf(),
-        llm_client: llm_client.clone(),
-        event_tx: event_tx.clone(),
-        background_tx: background_tx.clone(),
-    }));
+    if allowed("run_command") {
+        if allow_all {
+            registry.register(Arc::new(RunCommandTool {
+                work_dir: work_dir.to_path_buf(),
+                allowed_commands: vec![],
+            }));
+        } else {
+            registry.register(Arc::new(RunCommandTool::with_defaults(work_dir.to_path_buf())));
+        }
+    }
 
-    registry.register(Arc::new(SpawnSubAgentTool {
-        work_dir: work_dir.to_path_buf(),
-        source_root: work_dir.to_path_buf(),
-        llm_client,
-        event_tx,
-        registry: subagent_registry,
-        background_tx,
-    }));
+    if allowed("spawn_agent_team") {
+        registry.register(Arc::new(SpawnAgentTeamTool {
+            work_dir: work_dir.to_path_buf(),
+            source_root: work_dir.to_path_buf(),
+            llm_client: llm_client.clone(),
+            event_tx: event_tx.clone(),
+            background_tx: background_tx.clone(),
+        }));
+    }
 
-    registry.register(Arc::new(UpdateTaskListTool { tasks }));
+    if allowed("spawn_sub_agent") {
+        registry.register(Arc::new(SpawnSubAgentTool {
+            work_dir: work_dir.to_path_buf(),
+            source_root: work_dir.to_path_buf(),
+            llm_client,
+            event_tx,
+            registry: subagent_registry,
+            background_tx,
+        }));
+    }
+
+    if allowed("update_task_list") {
+        registry.register(Arc::new(UpdateTaskListTool { tasks }));
+    }
 
     registry
 }
@@ -722,6 +776,8 @@ async fn run_turn(
     tasks: Arc<Mutex<Vec<CliTask>>>,
     interrupt: Arc<AtomicBool>,
     subagent_registry: Arc<agent_sdk::SubAgentRegistry>,
+    json_mode: bool,
+    tool_filter: Option<&[String]>,
 ) -> anyhow::Result<TurnStats> {
     // Create background result channel — tools send completed background results
     // here, and we drain them before each LLM call to inject into conversation.
@@ -736,16 +792,23 @@ async fn run_turn(
         tasks.clone(),
         subagent_registry,
         Some(background_tx),
+        tool_filter,
     );
     let tool_defs = tools.definitions();
     let started = Instant::now();
+
+    if json_mode {
+        emit_ndjson(&NdjsonEvent::Started {
+            tools: tool_defs.iter().map(|t| t.name.clone()).collect(),
+        });
+    }
 
     messages.push(ChatMessage::user(user_input));
 
     let mut total_tokens = 0u64;
     let mut tool_calls_count = 0usize;
 
-    for _iteration in 0..max_iterations {
+    for iteration in 0..max_iterations {
         // Drain any completed background agent results and inject them
         // into the conversation so the LLM can reference them.
         while let Ok(result) = background_rx.try_recv() {
@@ -762,7 +825,9 @@ async fn run_turn(
         // Check for interrupt before each LLM call
         if interrupt.load(Ordering::Relaxed) {
             interrupt.store(false, Ordering::Relaxed);
-            eprintln!("\n  {}", style("⏎ Cancelled").yellow());
+            if !json_mode {
+                eprintln!("\n  {}", style("⏎ Cancelled").yellow());
+            }
             return Ok(TurnStats {
                 tokens: total_tokens,
                 tool_calls: tool_calls_count,
@@ -770,16 +835,44 @@ async fn run_turn(
             });
         }
 
-        let spinner = create_spinner("Thinking…");
+        let spinner = if json_mode { None } else { Some(create_spinner("Thinking…")) };
 
-        let result = llm_client.chat(messages, &tool_defs).await;
+        let result = if json_mode {
+            // Streaming mode: emit text_delta events as tokens arrive
+            let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel::<StreamDelta>();
+            let llm_fut = llm_client.chat_stream(messages, &tool_defs, delta_tx);
 
-        spinner.finish_and_clear();
+            // Drain deltas in background, emitting NDJSON as they arrive
+            let emit_handle = tokio::spawn(async move {
+                while let Some(delta) = delta_rx.recv().await {
+                    match delta {
+                        StreamDelta::Text(text) => {
+                            emit_ndjson(&NdjsonEvent::TextDelta { content: text });
+                        }
+                        StreamDelta::Thinking(text) => {
+                            // Thinking text will be emitted after we know the iteration
+                            // For now, buffer it — it's emitted by the main loop below
+                            let _ = text;
+                        }
+                    }
+                }
+            });
+
+            let res = llm_fut.await;
+            let _ = emit_handle.await;
+            res
+        } else {
+            llm_client.chat(messages, &tool_defs).await
+        };
+
+        if let Some(s) = spinner { s.finish_and_clear(); }
 
         // Check interrupt after call returns
         if interrupt.load(Ordering::Relaxed) {
             interrupt.store(false, Ordering::Relaxed);
-            eprintln!("  {}", style("⏎ Cancelled").yellow());
+            if !json_mode {
+                eprintln!("  {}", style("⏎ Cancelled").yellow());
+            }
             return Ok(TurnStats {
                 tokens: total_tokens,
                 tool_calls: tool_calls_count,
@@ -798,18 +891,34 @@ async fn run_turn(
                 // Show thinking text
                 if let Some(text) = content {
                     if !text.is_empty() {
-                        eprintln!("  {}", style(truncate(text, 200)).dim().italic());
+                        if json_mode {
+                            emit_ndjson(&NdjsonEvent::Thinking {
+                                content: text.clone(),
+                                iteration,
+                            });
+                        } else {
+                            eprintln!("  {}", style(truncate(text, 200)).dim().italic());
+                        }
                     }
                 }
 
                 messages.push(response.clone());
 
                 for tc in tool_calls {
-                    let label = format_tool_label(&tc.function.name, &tc.function.arguments);
-                    eprintln!("  {} {}", style("⎿").cyan(), label);
+                    if json_mode {
+                        emit_ndjson(&NdjsonEvent::ToolCall {
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.function.name.clone(),
+                            arguments: tc.function.arguments.clone(),
+                            iteration,
+                        });
+                    } else {
+                        let label = format_tool_label(&tc.function.name, &tc.function.arguments);
+                        eprintln!("  {} {}", style("⎿").cyan(), label);
 
-                    if tc.function.name == "spawn_agent_team" {
-                        print_team_plan(&tc.function.arguments);
+                        if tc.function.name == "spawn_agent_team" {
+                            print_team_plan(&tc.function.arguments);
+                        }
                     }
 
                     let args: serde_json::Value =
@@ -825,32 +934,54 @@ async fn run_turn(
                         Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
                     };
 
-                    let preview = format_result_preview(&tc.function.name, &result_content);
-                    eprintln!("    {}", style(&preview).dim());
+                    if json_mode {
+                        emit_ndjson(&NdjsonEvent::ToolResult {
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.function.name.clone(),
+                            content: result_content.clone(),
+                            iteration,
+                        });
+                    } else {
+                        let preview = format_result_preview(&tc.function.name, &result_content);
+                        eprintln!("    {}", style(&preview).dim());
 
-                    if tc.function.name == "spawn_agent_team" {
-                        print_team_result_summary(&result_content);
-                    } else if tc.function.name == "update_task_list" {
-                        let current = tasks.lock().expect("task list mutex poisoned").clone();
-                        print_task_list(&current);
+                        if tc.function.name == "spawn_agent_team" {
+                            print_team_result_summary(&result_content);
+                        } else if tc.function.name == "update_task_list" {
+                            let current = tasks.lock().expect("task list mutex poisoned").clone();
+                            print_task_list(&current);
+                        }
                     }
 
                     messages.push(ChatMessage::tool_result(&tc.id, &result_content));
                     tool_calls_count += 1;
                 }
-                eprintln!();
+                if !json_mode {
+                    eprintln!();
+                }
             }
 
             ChatMessage::Assistant { ref content, .. } => {
                 let answer = content.clone().unwrap_or_default();
                 messages.push(response);
 
-                // Print final answer
-                eprintln!();
-                for line in answer.lines() {
-                    println!("{}", line);
+                if json_mode {
+                    // Text was already streamed via text_delta events from chat_stream.
+                    // Only emit Completed with the final content for fallback.
+                    emit_ndjson(&NdjsonEvent::Completed {
+                        final_content: answer,
+                        tokens_used: total_tokens,
+                        iterations: iteration + 1,
+                        tool_calls: tool_calls_count,
+                    });
+                } else {
+                    // Print final answer
+                    eprintln!();
+                    for line in answer.lines() {
+                        println!("{}", line);
+                    }
+                    eprintln!();
                 }
-                eprintln!();
 
                 return Ok(TurnStats {
                     tokens: total_tokens,
@@ -862,9 +993,21 @@ async fn run_turn(
             other => {
                 let text = other.text_content().unwrap_or("").to_string();
                 messages.push(other);
-                eprintln!();
-                println!("{}", text);
-                eprintln!();
+
+                if json_mode {
+                    // Text was already streamed, just emit Completed
+                    emit_ndjson(&NdjsonEvent::Completed {
+                        final_content: text,
+                        tokens_used: total_tokens,
+                        iterations: iteration + 1,
+                        tool_calls: tool_calls_count,
+                    });
+                } else {
+                    eprintln!();
+                    println!("{}", text);
+                    eprintln!();
+                }
+
                 return Ok(TurnStats {
                     tokens: total_tokens,
                     tool_calls: tool_calls_count,
@@ -874,11 +1017,17 @@ async fn run_turn(
         }
     }
 
-    eprintln!(
-        "  {} max iterations ({}) reached",
-        style("⚠").yellow(),
-        max_iterations,
-    );
+    if json_mode {
+        emit_ndjson(&NdjsonEvent::Failed {
+            error: format!("max iterations ({}) reached", max_iterations),
+        });
+    } else {
+        eprintln!(
+            "  {} max iterations ({}) reached",
+            style("⚠").yellow(),
+            max_iterations,
+        );
+    }
     Ok(TurnStats {
         tokens: total_tokens,
         tool_calls: tool_calls_count,
@@ -999,7 +1148,19 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let work_dir = std::fs::canonicalize(&cli.dir)?;
+    let work_dir = match std::fs::canonicalize(&cli.dir) {
+        Ok(p) => p,
+        Err(e) => {
+            if cli.json {
+                emit_ndjson(&NdjsonEvent::Failed {
+                    error: format!("Working directory '{}' not found: {}", cli.dir.display(), e),
+                });
+                return Ok(());
+            } else {
+                return Err(e.into());
+            }
+        }
+    };
 
     // ── Provider detection ──
     let provider = if let Some(ref p) = cli.provider {
@@ -1281,8 +1442,9 @@ async fn main() -> anyhow::Result<()> {
         let prompt = cli.prompt.join(" ");
         let mut messages = vec![ChatMessage::system(&system_prompt)];
         let tasks = Arc::new(Mutex::new(Vec::<CliTask>::new()));
+        let tool_filter = cli.tools.as_deref();
 
-        let stats = run_turn(
+        let result = run_turn(
             &mut messages,
             &prompt,
             &llm_client,
@@ -1293,10 +1455,27 @@ async fn main() -> anyhow::Result<()> {
             tasks,
             interrupt,
             subagent_registry,
+            cli.json,
+            tool_filter,
         )
-        .await?;
+        .await;
 
-        print_usage(&stats);
+        match result {
+            Ok(stats) => {
+                if !cli.json {
+                    print_usage(&stats);
+                }
+            }
+            Err(e) => {
+                if cli.json {
+                    emit_ndjson(&NdjsonEvent::Failed {
+                        error: e.to_string(),
+                    });
+                } else {
+                    return Err(e);
+                }
+            }
+        }
         return Ok(());
     }
 
@@ -1438,6 +1617,8 @@ async fn main() -> anyhow::Result<()> {
             tasks.clone(),
             interrupt.clone(),
             subagent_registry.clone(),
+            false,
+            None,
         )
         .await?;
 
