@@ -270,13 +270,18 @@ impl AgentLoop {
                             )
                             .await;
 
-                        let result_content = match &result {
+                        let (result_content, result_preview) = match &result {
                             Ok(val) => {
+                                // Build a metadata-only preview before serializing,
+                                // so event consumers get parseable JSON even for
+                                // large tool results like read_file.
+                                let preview = build_result_preview(val);
                                 let full = serde_json::to_string(val).unwrap_or_default();
-                                truncate_tool_result(&full)
+                                (truncate_tool_result(&full), preview)
                             }
                             Err(e) => {
-                                serde_json::json!({"error": e.to_string()}).to_string()
+                                let err = serde_json::json!({"error": e.to_string()}).to_string();
+                                (err.clone(), err)
                             }
                         };
 
@@ -284,7 +289,7 @@ impl AgentLoop {
                             agent_id: self.agent_id,
                             name: self.agent_name.clone(),
                             tool_name: tool_call.function.name.clone(),
-                            result_preview: truncate(&result_content, 300),
+                            result_preview,
                             iteration,
                         });
 
@@ -566,6 +571,39 @@ impl AgentLoop {
             let _ = tx.send(event);
         }
     }
+}
+
+/// Build a compact JSON preview of a tool result for the `ToolResult` event.
+///
+/// Unlike raw truncation, this extracts metadata fields and omits large body
+/// fields like `content` / `stdout`, so event consumers (CLI display) can
+/// reliably parse the preview.
+fn build_result_preview(val: &serde_json::Value) -> String {
+    let obj = match val.as_object() {
+        Some(o) => o,
+        None => return truncate(&val.to_string(), 300),
+    };
+
+    let mut preview = serde_json::Map::new();
+    for (key, value) in obj {
+        match key.as_str() {
+            // Skip large body fields — include everything else
+            "content" | "stdout" | "stderr" => {
+                if let Some(s) = value.as_str() {
+                    let lines = s.lines().count();
+                    preview.insert(
+                        key.clone(),
+                        serde_json::Value::String(format!("[{} lines]", lines)),
+                    );
+                }
+            }
+            _ => {
+                preview.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    serde_json::to_string(&serde_json::Value::Object(preview)).unwrap_or_default()
 }
 
 fn truncate_tool_result(s: &str) -> String {
