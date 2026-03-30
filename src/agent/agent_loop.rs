@@ -250,31 +250,39 @@ impl AgentLoop {
 
                     self.messages.push(response.clone());
 
+                    // Emit ToolCall events for all calls upfront
                     for tool_call in tool_calls {
                         self.emit(AgentEvent::ToolCall {
                             agent_id: self.agent_id,
                             name: self.agent_name.clone(),
                             tool_name: tool_call.function.name.clone(),
-                            // Keep full arguments for event consumers so they can
-                            // reliably extract fields like path/command.
                             arguments: tool_call.function.arguments.clone(),
                             iteration,
                         });
+                    }
 
-                        let result = self
-                            .tools
-                            .execute(
-                                &tool_call.function.name,
+                    // Execute all tool calls in parallel
+                    let tools_ref = &self.tools;
+                    let futures: Vec<_> = tool_calls
+                        .iter()
+                        .map(|tool_call| {
+                            let name = tool_call.function.name.clone();
+                            let args: serde_json::Value =
                                 serde_json::from_str(&tool_call.function.arguments)
-                                    .unwrap_or_default(),
-                            )
-                            .await;
+                                    .unwrap_or_default();
+                            let id = tool_call.id.clone();
+                            async move {
+                                let result = tools_ref.execute(&name, args).await;
+                                (id, name, result)
+                            }
+                        })
+                        .collect();
 
+                    let results = futures_util::future::join_all(futures).await;
+
+                    for (call_id, tool_name, result) in results {
                         let (result_content, result_preview) = match &result {
                             Ok(val) => {
-                                // Build a metadata-only preview before serializing,
-                                // so event consumers get parseable JSON even for
-                                // large tool results like read_file.
                                 let preview = build_result_preview(val);
                                 let full = serde_json::to_string(val).unwrap_or_default();
                                 (truncate_tool_result(&full), preview)
@@ -288,13 +296,13 @@ impl AgentLoop {
                         self.emit(AgentEvent::ToolResult {
                             agent_id: self.agent_id,
                             name: self.agent_name.clone(),
-                            tool_name: tool_call.function.name.clone(),
+                            tool_name,
                             result_preview,
                             iteration,
                         });
 
                         self.messages.push(ChatMessage::tool_result(
-                            &tool_call.id,
+                            &call_id,
                             &result_content,
                         ));
 
