@@ -1,8 +1,9 @@
-# agent-sdk
+# agent-orchestrator-sdk
 
 Orchestrate teams of LLM-powered agents in Rust. Coordinate multiple agent instances working together — one session acts as the team lead, coordinating work and assigning tasks. Teammates work independently, each with its own context, and communicate directly with each other.
 
-Detailed usage docs live in [docs/README.md](/Users/ThangLT4/Desktop/code/rust-agent-sdk/docs/README.md).
+The package is published as `agent-orchestrator-sdk` and imported in Rust code as `agent_sdk`.
+Additional usage docs live under `docs/` in the repository.
 
 ## When to use agent teams
 
@@ -30,7 +31,7 @@ Agent teams use more tokens than a single session. For sequential tasks, same-fi
 ```toml
 # Cargo.toml
 [dependencies]
-agent-sdk = { path = "." }
+agent-orchestrator-sdk = "0.1"
 tokio = { version = "1", features = ["full"] }
 ```
 

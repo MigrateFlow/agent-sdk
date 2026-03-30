@@ -1,6 +1,6 @@
 # SDK Documentation
 
-This folder documents the current `agent-sdk` API and runtime behavior in this repository.
+This folder documents the current `agent-orchestrator-sdk` API and runtime behavior in this repository.
 
 The SDK has two main entrypoints:
 
@@ -9,12 +9,12 @@ The SDK has two main entrypoints:
 
 Use these documents in this order:
 
-- [getting-started.md](/Users/ThangLT4/Desktop/code/rust-agent-sdk/docs/getting-started.md): install, configure providers, run the CLI, and create your first program
-- [single-agent.md](/Users/ThangLT4/Desktop/code/rust-agent-sdk/docs/single-agent.md): `AgentTeam::run_single` and direct `AgentLoop` usage
-- [teams.md](/Users/ThangLT4/Desktop/code/rust-agent-sdk/docs/teams.md): teammates, tasks, dependencies, hooks, events, and shared infrastructure
-- [cli.md](/Users/ThangLT4/Desktop/code/rust-agent-sdk/docs/cli.md): the `agent` binary, flags, REPL commands, and tool access
-- [extending.md](/Users/ThangLT4/Desktop/code/rust-agent-sdk/docs/extending.md): custom tools, prompt builders, hooks, and LLM clients
-- [reference.md](/Users/ThangLT4/Desktop/code/rust-agent-sdk/docs/reference.md): compact API and runtime reference
+- [getting-started.md](getting-started.md): install, configure providers, run the CLI, and create your first program
+- [single-agent.md](single-agent.md): `AgentTeam::run_single` and direct `AgentLoop` usage
+- [teams.md](teams.md): teammates, tasks, dependencies, hooks, events, and shared infrastructure
+- [cli.md](cli.md): the `agent` binary, flags, REPL commands, and tool access
+- [extending.md](extending.md): custom tools, prompt builders, hooks, and LLM clients
+- [reference.md](reference.md): compact API and runtime reference
 
 ## Current Shape Of The SDK
 

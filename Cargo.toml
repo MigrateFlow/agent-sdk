@@ -1,9 +1,27 @@
 [package]
-name = "agent-sdk"
+name = "agent-orchestrator-sdk"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.78"
 license = "MIT"
-description = "A generic multi-agent SDK with ReAct loop, task management, and LLM integration"
+description = "Rust SDK for orchestrating LLM-powered agents, shared task execution, and teammate coordination"
+readme = "README.md"
+documentation = "https://docs.rs/agent-orchestrator-sdk"
+homepage = "https://github.com/toreleon/rust-agent-sdk"
+repository = "https://github.com/toreleon/rust-agent-sdk"
+keywords = ["agent", "llm", "multi-agent", "orchestration", "ai"]
+categories = ["api-bindings", "asynchronous"]
+include = [
+    "Cargo.toml",
+    "LICENSE",
+    "README.md",
+    "docs/**",
+    "src/**",
+]
+
+[lib]
+name = "agent_sdk"
+path = "src/lib.rs"
 
 [[bin]]
 name = "agent"

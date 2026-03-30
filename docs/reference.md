@@ -4,7 +4,7 @@ This is a compact reference for the current public SDK surface.
 
 ## Top-Level Re-Exports
 
-From [src/lib.rs](/Users/ThangLT4/Desktop/code/rust-agent-sdk/src/lib.rs):
+From `src/lib.rs`:
 
 - `AgentLoop`
 - `AgentTeam`

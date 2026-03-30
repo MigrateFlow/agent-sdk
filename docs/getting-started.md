@@ -6,7 +6,7 @@ Add the crate to your project:
 
 ```toml
 [dependencies]
-agent-sdk = { path = "../rust-agent-sdk" }
+agent-orchestrator-sdk = "0.1"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 serde_json = "1"
@@ -14,7 +14,7 @@ serde_json = "1"
 
 ## Choose A Provider
 
-`agent-sdk` currently supports:
+`agent-orchestrator-sdk` currently supports:
 
 - `LlmProvider::Claude`
 - `LlmProvider::OpenAi`
@@ -177,4 +177,4 @@ Provider override:
 cargo run --bin agent -- -p openai -m gpt-4o "inspect this project"
 ```
 
-See [cli.md](/Users/ThangLT4/Desktop/code/rust-agent-sdk/docs/cli.md) for the full CLI flow.
+See [cli.md](cli.md) for the full CLI flow.

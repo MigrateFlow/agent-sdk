@@ -1,6 +1,6 @@
 # CLI Usage
 
-The repository ships a binary named `agent` in [src/bin/agent.rs](/Users/ThangLT4/Desktop/code/rust-agent-sdk/src/bin/agent.rs).
+The repository ships a binary named `agent` in `src/bin/agent.rs`.
 
 It runs a conversational ReAct loop with tool access and optional team spawning.
 
