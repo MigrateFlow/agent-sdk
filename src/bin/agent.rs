@@ -566,6 +566,7 @@ fn build_tools(
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
     tasks: Arc<Mutex<Vec<CliTask>>>,
     subagent_registry: Arc<agent_sdk::SubAgentRegistry>,
+    background_tx: Option<tokio::sync::mpsc::UnboundedSender<agent_sdk::agent::agent_loop::BackgroundResult>>,
 ) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
 
@@ -599,6 +600,7 @@ fn build_tools(
         source_root: work_dir.to_path_buf(),
         llm_client: llm_client.clone(),
         event_tx: event_tx.clone(),
+        background_tx: background_tx.clone(),
     }));
 
     registry.register(Arc::new(SpawnSubAgentTool {
@@ -607,6 +609,7 @@ fn build_tools(
         llm_client,
         event_tx,
         registry: subagent_registry,
+        background_tx,
     }));
 
     registry.register(Arc::new(UpdateTaskListTool { tasks }));
@@ -720,6 +723,11 @@ async fn run_turn(
     interrupt: Arc<AtomicBool>,
     subagent_registry: Arc<agent_sdk::SubAgentRegistry>,
 ) -> anyhow::Result<TurnStats> {
+    // Create background result channel — tools send completed background results
+    // here, and we drain them before each LLM call to inject into conversation.
+    let (background_tx, mut background_rx) =
+        tokio::sync::mpsc::unbounded_channel::<agent_sdk::agent::agent_loop::BackgroundResult>();
+
     let tools = build_tools(
         work_dir,
         allow_all,
@@ -727,6 +735,7 @@ async fn run_turn(
         event_tx,
         tasks.clone(),
         subagent_registry,
+        Some(background_tx),
     );
     let tool_defs = tools.definitions();
     let started = Instant::now();
@@ -737,6 +746,19 @@ async fn run_turn(
     let mut tool_calls_count = 0usize;
 
     for _iteration in 0..max_iterations {
+        // Drain any completed background agent results and inject them
+        // into the conversation so the LLM can reference them.
+        while let Ok(result) = background_rx.try_recv() {
+            let kind_label = match result.kind {
+                agent_sdk::agent::agent_loop::BackgroundResultKind::SubAgent => "subagent",
+                agent_sdk::agent::agent_loop::BackgroundResultKind::AgentTeam => "agent team",
+            };
+            let notification = format!(
+                "[Background {} '{}' completed — {} tokens]\n\n{}",
+                kind_label, result.name, result.tokens_used, result.content,
+            );
+            messages.push(ChatMessage::user(notification));
+        }
         // Check for interrupt before each LLM call
         if interrupt.load(Ordering::Relaxed) {
             interrupt.store(false, Ordering::Relaxed);
@@ -1194,6 +1216,7 @@ async fn main() -> anyhow::Result<()> {
                     ref name,
                     tokens_used,
                     tool_calls,
+                    ref final_content,
                     ..
                 } => {
                     let c = teammate_color(name, &mut color_map, &mut next_color);
@@ -1204,6 +1227,15 @@ async fn main() -> anyhow::Result<()> {
                         format_token_count(tokens_used),
                         tool_calls,
                     );
+                    // Show a brief preview of the result
+                    if !final_content.is_empty() {
+                        let preview = truncate(final_content.lines().next().unwrap_or(""), 80);
+                        eprintln!(
+                            "    {}   {}",
+                            name_tag(name, c),
+                            style(preview).dim(),
+                        );
+                    }
                 }
                 AgentEvent::SubAgentFailed { ref name, ref error, .. } => {
                     let c = teammate_color(name, &mut color_map, &mut next_color);

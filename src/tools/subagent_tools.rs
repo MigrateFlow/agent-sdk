@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::agent::agent_loop::{BackgroundResult, BackgroundResultKind};
 use crate::agent::events::AgentEvent;
 use crate::agent::subagent::{SubAgentDef, SubAgentRegistry, SubAgentRunner};
 use crate::error::{SdkError, SdkResult};
@@ -25,6 +26,9 @@ pub struct SpawnSubAgentTool {
     pub llm_client: Arc<dyn LlmClient>,
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
     pub registry: Arc<SubAgentRegistry>,
+    /// When set, background subagent results are sent back through this channel
+    /// so the parent agent loop can inject them into its conversation.
+    pub background_tx: Option<tokio::sync::mpsc::UnboundedSender<BackgroundResult>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -189,16 +193,29 @@ impl Tool for SpawnSubAgentTool {
         };
 
         if request.background || def.background {
-            // Background execution — return immediately with agent_id
+            // Background execution — return immediately, deliver results later.
+            // When background_tx is set the result is injected back into the
+            // parent agent's conversation (like Claude Code).  The event channel
+            // is always notified for CLI display.
             let agent_id = Uuid::new_v4();
             let handle = runner.run_background(def.clone(), request.prompt);
 
-            // Spawn a task to collect the result (fire and forget for now)
             let event_tx = self.event_tx.clone();
+            let background_tx = self.background_tx.clone();
             let name = def.name.clone();
             tokio::spawn(async move {
                 match handle.await {
                     Ok(Ok(result)) => {
+                        // Deliver result back to parent agent's conversation
+                        if let Some(bg_tx) = background_tx {
+                            let _ = bg_tx.send(BackgroundResult {
+                                name: result.name.clone(),
+                                kind: BackgroundResultKind::SubAgent,
+                                content: result.final_content.clone(),
+                                tokens_used: result.total_tokens,
+                            });
+                        }
+                        // Notify event listeners (CLI display)
                         if let Some(tx) = event_tx {
                             let _ = tx.send(AgentEvent::SubAgentCompleted {
                                 agent_id: result.agent_id,
@@ -206,6 +223,7 @@ impl Tool for SpawnSubAgentTool {
                                 tokens_used: result.total_tokens,
                                 iterations: result.iterations,
                                 tool_calls: result.tool_calls_count,
+                                final_content: result.final_content,
                             });
                         }
                     }
@@ -234,7 +252,7 @@ impl Tool for SpawnSubAgentTool {
                 "status": "background",
                 "agent_id": agent_id.to_string(),
                 "name": def.name,
-                "message": "Subagent started in background. Results will be delivered via events."
+                "message": "Subagent started in background. You will be notified when it completes — continue with other work."
             }))
         } else {
             // Foreground (blocking) execution

@@ -125,6 +125,8 @@ pub enum AgentEvent {
         tokens_used: u64,
         iterations: usize,
         tool_calls: usize,
+        /// The final content returned by the subagent (for display and result delivery).
+        final_content: String,
     },
     SubAgentFailed {
         agent_id: AgentId,

@@ -333,6 +333,40 @@ let team = AgentTeam::new(LlmConfig::default(), AgentConfig::default())
     .prompt_builder(Arc::new(DocsPromptBuilder));
 ```
 
+## Background Execution
+
+Both `spawn_agent_team` and `spawn_subagent` support background mode. When `background: true` is set:
+
+1. The tool returns immediately with a status message
+2. The agent/team runs concurrently in a separate tokio task
+3. When work completes, the result is delivered back to the parent agent's conversation via the `BackgroundResult` channel
+4. The parent agent sees the result injected as a user message before its next LLM call
+
+This mirrors Claude Code's behavior where background agents run independently and the parent is automatically notified on completion.
+
+### When to use background mode
+
+- **Foreground (default):** Use when you need the result before proceeding. The tool blocks until complete.
+- **Background:** Use when you have genuinely independent work to do in parallel. Continue working while the agent/team runs concurrently.
+
+### Wiring up background results
+
+```rust
+use agent_sdk::agent::agent_loop::BackgroundResult;
+
+// Create the channel
+let (bg_tx, bg_rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundResult>();
+
+// Pass bg_tx to SpawnAgentTeamTool and SpawnSubAgentTool
+let team_tool = SpawnAgentTeamTool {
+    // ...
+    background_tx: Some(bg_tx.clone()),
+};
+
+// Set bg_rx on the parent AgentLoop
+loop_.set_background_rx(bg_rx);
+```
+
 ## Practical Caveats
 
 - `source_root` is the read side used by `read_file`, `list_directory`, and `search_files`

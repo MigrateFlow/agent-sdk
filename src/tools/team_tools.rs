@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::agent::agent_loop::{BackgroundResult, BackgroundResultKind};
 use crate::agent::events::AgentEvent;
 use crate::agent::hooks::HookRegistry;
 use crate::agent::memory::MemoryStore;
@@ -27,6 +28,9 @@ pub struct SpawnAgentTeamTool {
     pub source_root: PathBuf,
     pub llm_client: Arc<dyn LlmClient>,
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
+    /// When set, background team results are sent back through this channel
+    /// so the parent agent loop can inject them into its conversation.
+    pub background_tx: Option<tokio::sync::mpsc::UnboundedSender<BackgroundResult>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,6 +42,11 @@ struct TeamRequest {
     /// claim tasks on a first-come basis.
     #[serde(default = "default_true")]
     auto_assign: bool,
+    /// Run the team in the background (concurrent). Default: false (blocking).
+    /// When true, returns immediately and delivers results via the background
+    /// channel when all tasks complete.
+    #[serde(default)]
+    background: bool,
 }
 
 fn default_true() -> bool {
@@ -92,6 +101,10 @@ impl Tool for SpawnAgentTeamTool {
                     "auto_assign": {
                         "type": "boolean",
                         "description": "Auto-assign tasks to teammates by keyword matching (default: true). Set false to let teammates claim freely."
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": "If true, run the team in background (concurrent). Returns immediately; you will be notified when all tasks complete. Default: false."
                     },
                     "tasks": {
                         "type": "array",
@@ -228,26 +241,80 @@ impl Tool for SpawnAgentTeamTool {
             teammate_specs,
         };
 
-        match lead.run().await {
-            Ok(summary) => Ok(json!({
-                "status": "completed",
+        if request.background {
+            // Background execution — return immediately, deliver results later.
+            let background_tx = self.background_tx.clone();
+            let team_name_bg = team_name.clone();
+            let teammate_names_bg = teammate_names.clone();
+            let task_titles_bg = task_titles.clone();
+
+            tokio::spawn(async move {
+                match lead.run().await {
+                    Ok(summary) => {
+                        let content = format!(
+                            "Team '{}' completed: {}/{} tasks succeeded, {} failed. {} tokens used.\nTeammates: {}\nTasks: {}",
+                            team_name_bg,
+                            summary.tasks_completed,
+                            summary.total_tasks,
+                            summary.tasks_failed,
+                            summary.total_tokens_used,
+                            teammate_names_bg.join(", "),
+                            task_titles_bg.join(", "),
+                        );
+                        if let Some(bg_tx) = background_tx {
+                            let _ = bg_tx.send(BackgroundResult {
+                                name: team_name_bg,
+                                kind: BackgroundResultKind::AgentTeam,
+                                content,
+                                tokens_used: summary.total_tokens_used,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(bg_tx) = background_tx {
+                            let _ = bg_tx.send(BackgroundResult {
+                                name: team_name_bg,
+                                kind: BackgroundResultKind::AgentTeam,
+                                content: format!("Team failed: {}", e),
+                                tokens_used: 0,
+                            });
+                        }
+                    }
+                }
+            });
+
+            Ok(json!({
+                "status": "background",
                 "team_name": team_name,
                 "teammates": teammate_names,
                 "tasks": task_titles,
                 "task_assignments": task_assignments,
-                "total_tasks": summary.total_tasks,
-                "tasks_completed": summary.tasks_completed,
-                "tasks_failed": summary.tasks_failed,
-                "agents_spawned": summary.agents_spawned,
-                "total_tokens_used": summary.total_tokens_used
-            })),
-            Err(e) => Ok(json!({
-                "status": "failed",
-                "error": e.to_string(),
-                "team_name": team_name,
-                "teammates": teammate_names,
-                "tasks_created": task_count
-            })),
+                "total_tasks": task_count,
+                "message": "Agent team started in background. You will be notified when all tasks complete — continue with other work."
+            }))
+        } else {
+            // Foreground (blocking) execution
+            match lead.run().await {
+                Ok(summary) => Ok(json!({
+                    "status": "completed",
+                    "team_name": team_name,
+                    "teammates": teammate_names,
+                    "tasks": task_titles,
+                    "task_assignments": task_assignments,
+                    "total_tasks": summary.total_tasks,
+                    "tasks_completed": summary.tasks_completed,
+                    "tasks_failed": summary.tasks_failed,
+                    "agents_spawned": summary.agents_spawned,
+                    "total_tokens_used": summary.total_tokens_used
+                })),
+                Err(e) => Ok(json!({
+                    "status": "failed",
+                    "error": e.to_string(),
+                    "team_name": team_name,
+                    "teammates": teammate_names,
+                    "tasks_created": task_count
+                })),
+            }
         }
     }
 }

@@ -13,7 +13,7 @@ pub mod storage;
 // Convenience re-exports
 pub use error::{AgentId, TaskId, SdkError, SdkResult};
 pub use config::{LlmConfig, LlmProvider, AgentConfig, AGENT_DIR};
-pub use agent::agent_loop::AgentLoop;
+pub use agent::agent_loop::{AgentLoop, BackgroundResult, BackgroundResultKind};
 pub use agent::subagent::{SubAgentDef, SubAgentRegistry, SubAgentResult, SubAgentRunner};
 pub use agent::team::AgentTeam;
 pub use agent::team_lead::{TeamLead, ExecutionSummary, TeammateSpec};

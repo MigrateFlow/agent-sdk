@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, info, warn};
 
 use crate::error::{AgentId, SdkError, SdkResult};
@@ -9,6 +9,27 @@ use crate::traits::llm_client::LlmClient;
 use crate::tools::registry::ToolRegistry;
 
 use super::events::AgentEvent;
+
+/// A result delivered from a background agent (subagent or team) back to the
+/// parent agent's conversation.  The agent loop drains these before each LLM
+/// call and injects them as user-role messages so the model can reference them.
+#[derive(Debug, Clone)]
+pub struct BackgroundResult {
+    /// Human-readable name (e.g. "explore", "backend-team").
+    pub name: String,
+    /// Whether this was a subagent or a team.
+    pub kind: BackgroundResultKind,
+    /// The final content / summary produced by the background agent.
+    pub content: String,
+    /// Token usage.
+    pub tokens_used: u64,
+}
+
+#[derive(Debug, Clone)]
+pub enum BackgroundResultKind {
+    SubAgent,
+    AgentTeam,
+}
 
 const CHARS_PER_ESTIMATED_TOKEN: usize = 4;
 const DEFAULT_MAX_CONTEXT_TOKENS: usize = 200_000;
@@ -96,6 +117,9 @@ pub struct AgentLoop {
     tool_calls_count: usize,
     event_tx: Option<UnboundedSender<AgentEvent>>,
     compaction_strategy: CompactionStrategy,
+    /// Receives results from background subagents / teams.
+    /// Drained before each LLM call and injected as user messages.
+    background_rx: Option<UnboundedReceiver<BackgroundResult>>,
 }
 
 impl AgentLoop {
@@ -119,6 +143,7 @@ impl AgentLoop {
             tool_calls_count: 0,
             event_tx: None,
             compaction_strategy: CompactionStrategy::default(),
+            background_rx: None,
         }
     }
 
@@ -160,11 +185,19 @@ impl AgentLoop {
             tool_calls_count: 0,
             event_tx: None,
             compaction_strategy: CompactionStrategy::default(),
+            background_rx: None,
         }
     }
 
     pub fn set_event_sink(&mut self, tx: UnboundedSender<AgentEvent>) {
         self.event_tx = Some(tx);
+    }
+
+    /// Set the receiver for background agent results.
+    /// Results arriving on this channel are injected as user messages before
+    /// each LLM call, mirroring Claude Code's background agent notification.
+    pub fn set_background_rx(&mut self, rx: UnboundedReceiver<BackgroundResult>) {
+        self.background_rx = Some(rx);
     }
 
     /// Get a clone of the current conversation messages.
@@ -179,6 +212,10 @@ impl AgentLoop {
         let tool_defs = self.tools.definitions();
 
         for iteration in 0..self.max_iterations {
+            // Drain any completed background agent results and inject them
+            // as user messages so the LLM can reference them.
+            self.drain_background_results();
+
             self.compact_if_needed();
 
             debug!(
@@ -493,6 +530,34 @@ impl AgentLoop {
                     };
                 }
             }
+        }
+    }
+
+    /// Drain all pending background results and inject them as user messages.
+    /// This mirrors Claude Code's behavior: when a background agent finishes,
+    /// the parent agent is automatically notified with the result content.
+    fn drain_background_results(&mut self) {
+        let rx = match self.background_rx.as_mut() {
+            Some(rx) => rx,
+            None => return,
+        };
+
+        while let Ok(result) = rx.try_recv() {
+            let kind_label = match result.kind {
+                BackgroundResultKind::SubAgent => "subagent",
+                BackgroundResultKind::AgentTeam => "agent team",
+            };
+            let notification = format!(
+                "[Background {} '{}' completed — {} tokens]\n\n{}",
+                kind_label, result.name, result.tokens_used, result.content,
+            );
+            info!(
+                agent_id = %self.agent_id,
+                background_agent = %result.name,
+                tokens = result.tokens_used,
+                "Background agent result injected into conversation"
+            );
+            self.messages.push(ChatMessage::user(notification));
         }
     }
 

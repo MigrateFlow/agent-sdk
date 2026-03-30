@@ -148,6 +148,23 @@ let loop_ = AgentLoop::new(
 
 When the conversation grows too large, the current implementation compacts older assistant and tool-result messages rather than failing immediately.
 
+## Background Agent Results
+
+When subagents or agent teams run in background mode, their results are delivered back to the parent agent's conversation automatically. Set up the background result channel:
+
+```rust
+use agent_sdk::agent::agent_loop::BackgroundResult;
+
+let (bg_tx, bg_rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundResult>();
+loop_.set_background_rx(bg_rx);
+
+// Pass bg_tx to SpawnSubAgentTool and SpawnAgentTeamTool via their
+// `background_tx` field. When a background agent completes, its result
+// is injected as a user message before the next LLM call.
+```
+
+This mirrors Claude Code's behavior: the parent agent continues working while background agents run concurrently, and is automatically notified with results when they finish.
+
 ## Event Streaming
 
 Attach an event sink to observe loop activity:

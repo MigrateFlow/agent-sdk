@@ -247,6 +247,7 @@ impl SubAgentRunner {
                     tokens_used: result.total_tokens,
                     iterations: result.iterations,
                     tool_calls: result.tool_calls_count,
+                    final_content: result.final_content.clone(),
                 });
 
                 Ok(result)
