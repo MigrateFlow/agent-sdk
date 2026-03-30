@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -18,7 +18,6 @@ use agent_sdk::types::chat::ChatMessage;
 use agent_sdk::AgentEvent;
 use clap::Parser;
 use console::{style, Term};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -663,67 +662,6 @@ fn read_input_buffered() -> io::Result<String> {
     Ok(full)
 }
 
-struct EscapeWatcher {
-    stop: Arc<AtomicBool>,
-    handle: tokio::task::JoinHandle<()>,
-    raw_mode_enabled: bool,
-}
-
-impl EscapeWatcher {
-    fn start(interrupt: Arc<AtomicBool>) -> Option<Self> {
-        if !io::stderr().is_terminal() {
-            return None;
-        }
-
-        let raw_mode_enabled = crossterm::terminal::enable_raw_mode().is_ok();
-        if !raw_mode_enabled {
-            return None;
-        }
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_for_task = stop.clone();
-
-        let handle = tokio::task::spawn_blocking(move || {
-            while !stop_for_task.load(Ordering::Relaxed) {
-                match event::poll(std::time::Duration::from_millis(100)) {
-                    Ok(true) => match event::read() {
-                        Ok(Event::Key(key))
-                            if key.kind == KeyEventKind::Press
-                                && key.code == KeyCode::Esc =>
-                        {
-                            interrupt.store(true, Ordering::Relaxed);
-                        }
-                        Ok(_) => {}
-                        Err(_) => break,
-                    },
-                    Ok(false) => {}
-                    Err(_) => break,
-                }
-            }
-        });
-
-        Some(Self {
-            stop,
-            handle,
-            raw_mode_enabled,
-        })
-    }
-
-    async fn stop(self) {
-        self.stop.store(true, Ordering::Relaxed);
-        let _ = self.handle.await;
-        if self.raw_mode_enabled {
-            let _ = crossterm::terminal::disable_raw_mode();
-        }
-    }
-}
-
-async fn stop_escape_watcher(watcher: &mut Option<EscapeWatcher>) {
-    if let Some(watcher) = watcher.take() {
-        watcher.stop().await;
-    }
-}
-
 // ─── ReAct turn ──────────────────────────────────────────────────────────────
 
 struct TurnStats {
@@ -751,7 +689,6 @@ async fn run_turn(
     tasks: Arc<Mutex<Vec<CliTask>>>,
     interrupt: Arc<AtomicBool>,
 ) -> anyhow::Result<TurnStats> {
-    let mut escape_watcher = EscapeWatcher::start(interrupt.clone());
     let tools = build_tools(
         work_dir,
         allow_all,
@@ -772,13 +709,11 @@ async fn run_turn(
         if interrupt.load(Ordering::Relaxed) {
             interrupt.store(false, Ordering::Relaxed);
             eprintln!("\n  {}", style("⏎ Cancelled").yellow());
-            let stats = TurnStats {
+            return Ok(TurnStats {
                 tokens: total_tokens,
                 tool_calls: tool_calls_count,
                 duration: started.elapsed(),
-            };
-            stop_escape_watcher(&mut escape_watcher).await;
-            return Ok(stats);
+            });
         }
 
         let spinner = create_spinner("Thinking…");
@@ -791,13 +726,11 @@ async fn run_turn(
         if interrupt.load(Ordering::Relaxed) {
             interrupt.store(false, Ordering::Relaxed);
             eprintln!("  {}", style("⏎ Cancelled").yellow());
-            let stats = TurnStats {
+            return Ok(TurnStats {
                 tokens: total_tokens,
                 tool_calls: tool_calls_count,
                 duration: started.elapsed(),
-            };
-            stop_escape_watcher(&mut escape_watcher).await;
-            return Ok(stats);
+            });
         }
 
         let (response, tokens) = result?;
@@ -865,13 +798,11 @@ async fn run_turn(
                 }
                 eprintln!();
 
-                let stats = TurnStats {
+                return Ok(TurnStats {
                     tokens: total_tokens,
                     tool_calls: tool_calls_count,
                     duration: started.elapsed(),
-                };
-                stop_escape_watcher(&mut escape_watcher).await;
-                return Ok(stats);
+                });
             }
 
             other => {
@@ -880,13 +811,11 @@ async fn run_turn(
                 eprintln!();
                 println!("{}", text);
                 eprintln!();
-                let stats = TurnStats {
+                return Ok(TurnStats {
                     tokens: total_tokens,
                     tool_calls: tool_calls_count,
                     duration: started.elapsed(),
-                };
-                stop_escape_watcher(&mut escape_watcher).await;
-                return Ok(stats);
+                });
             }
         }
     }
@@ -896,13 +825,11 @@ async fn run_turn(
         style("⚠").yellow(),
         max_iterations,
     );
-    let stats = TurnStats {
+    Ok(TurnStats {
         tokens: total_tokens,
         tool_calls: tool_calls_count,
         duration: started.elapsed(),
-    };
-    stop_escape_watcher(&mut escape_watcher).await;
-    Ok(stats)
+    })
 }
 
 // ─── Compact ─────────────────────────────────────────────────────────────────
