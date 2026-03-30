@@ -353,43 +353,46 @@ fn print_team_plan(arguments: &str) {
     let tasks = args["tasks"].as_array().cloned().unwrap_or_default();
     let auto_assign = args["auto_assign"].as_bool().unwrap_or(true);
 
-    eprintln!("  {}", style("Team Plan").magenta().bold());
-
     if !teammates.is_empty() {
-        eprintln!("    {}", style("teammates").dim());
-        for teammate in teammates {
+        eprintln!(
+            "    {} {}",
+            style("Teammates").dim(),
+            style(format!("({})", teammates.len())).dim(),
+        );
+        for (i, teammate) in teammates.iter().enumerate() {
             let name = teammate["name"].as_str().unwrap_or("unnamed");
             let role = teammate["role"].as_str().unwrap_or("");
             let needs_plan = teammate["require_plan_approval"].as_bool().unwrap_or(false);
-            if needs_plan {
-                eprintln!(
-                    "      {} {} {}",
-                    style("•").magenta(),
-                    style(name).white().bold(),
-                    style(format!("— {} [plan approval]", truncate(role, 80))).dim(),
-                );
+            let connector = if i == teammates.len() - 1 && tasks.is_empty() { "⎿" } else { "│" };
+            let suffix = if needs_plan {
+                format!(" {}", style("[plan approval]").yellow())
             } else {
-                eprintln!(
-                    "      {} {} {}",
-                    style("•").magenta(),
-                    style(name).white().bold(),
-                    style(format!("— {}", truncate(role, 80))).dim(),
-                );
-            }
+                String::new()
+            };
+            eprintln!(
+                "    {} {} {}{}",
+                style(connector).dim(),
+                style(name).magenta().bold(),
+                style(truncate(role, 60)).dim(),
+                suffix,
+            );
         }
     }
 
     if !tasks.is_empty() {
+        let assign_label = if auto_assign { "auto-assign" } else { "claim freely" };
         eprintln!(
-            "    {} {}",
-            style("tasks").dim(),
-            style(if auto_assign { "(auto-assign)" } else { "(claim freely)" }).dim(),
+            "    {} {} ({})",
+            style("│").dim(),
+            style("Tasks").dim(),
+            style(assign_label).dim(),
         );
         for (idx, task) in tasks.iter().enumerate() {
             let title = task["title"].as_str().unwrap_or("untitled");
             let depends_on = task["depends_on"].as_array().cloned().unwrap_or_default();
-            let line = if depends_on.is_empty() {
-                title.to_string()
+            let connector = if idx == tasks.len() - 1 { "⎿" } else { "│" };
+            let dep_str = if depends_on.is_empty() {
+                String::new()
             } else {
                 let deps = depends_on
                     .iter()
@@ -397,17 +400,17 @@ fn print_team_plan(arguments: &str) {
                     .map(|v| (v + 1).to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("{} [deps: {}]", title, deps)
+                format!(" {}", style(format!("[deps: {}]", deps)).dim())
             };
             eprintln!(
-                "      {} {}",
-                style(format!("{}. ", idx + 1)).magenta(),
-                style(line).white(),
+                "    {} {} {}{}",
+                style(connector).dim(),
+                style(format!("{}.", idx + 1)).magenta(),
+                style(title).white(),
+                dep_str,
             );
         }
     }
-
-    eprintln!();
 }
 
 fn print_team_result_summary(result: &str) {
@@ -417,20 +420,20 @@ fn print_team_result_summary(result: &str) {
         return;
     }
 
-    eprintln!("  {}", style("Task Assignments").magenta().bold());
+    eprintln!("    {}", style("Assignments").dim());
     for (idx, assignment) in assignments.iter().enumerate() {
         let title = assignment["title"].as_str().unwrap_or("untitled");
         let target = assignment["target_file"].as_str().unwrap_or("?");
         let assignee = assignment["assigned_teammate"].as_str().unwrap_or("unassigned");
+        let connector = if idx == assignments.len() - 1 { "⎿" } else { "│" };
         eprintln!(
             "    {} {} {} {}",
-            style(format!("{}. ", idx)).magenta(),
+            style(connector).dim(),
             style(title).white(),
             style(format!("→ {}", target)).dim(),
             style(format!("[{}]", assignee)).cyan(),
         );
     }
-    eprintln!();
 }
 
 fn task_status_display(status: &str) -> (console::StyledObject<&'static str>, console::Color) {
@@ -1284,7 +1287,7 @@ async fn main() -> anyhow::Result<()> {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
     tokio::spawn(async move {
-        // Color palette for teammates — cycle through these
+        // Color palette for agents — cycle through these
         const COLORS: &[console::Color] = &[
             console::Color::Magenta,
             console::Color::Blue,
@@ -1296,7 +1299,7 @@ async fn main() -> anyhow::Result<()> {
         let mut color_map = std::collections::HashMap::<String, console::Color>::new();
         let mut next_color = 0usize;
 
-        let teammate_color = |name: &str, map: &mut std::collections::HashMap<String, console::Color>, next: &mut usize| -> console::Color {
+        let agent_color = |name: &str, map: &mut std::collections::HashMap<String, console::Color>, next: &mut usize| -> console::Color {
             *map.entry(name.to_string()).or_insert_with(|| {
                 let c = COLORS[*next % COLORS.len()];
                 *next += 1;
@@ -1304,44 +1307,51 @@ async fn main() -> anyhow::Result<()> {
             })
         };
 
-        // Fixed-width name tag for alignment
+        // Render agent name as a fixed-width tag with a left border
         let name_tag = |name: &str, color: console::Color| -> String {
-            let display = if name.len() > 18 { &name[..18] } else { name };
-            format!("{}", style(format!("{:<18}", display)).fg(color).bold())
+            let display = if name.len() > 16 { &name[..16] } else { name };
+            format!(
+                "  {} {}",
+                style("│").fg(color),
+                style(format!("{:<16}", display)).fg(color).bold(),
+            )
         };
 
         while let Some(event) = event_rx.recv().await {
             match event {
+                // ── Team lifecycle ──────────────────────────────────────
                 AgentEvent::TeamSpawned { teammate_count } => {
                     eprintln!();
                     eprintln!(
-                        "  {} {} teammates",
-                        style("⎿ Team").cyan().bold(),
-                        style(teammate_count).white(),
+                        "  {} {}",
+                        style("⎿").cyan(),
+                        style(format!("Agent Team ({} teammates)", teammate_count)).cyan().bold(),
                     );
                 }
                 AgentEvent::TeammateSpawned { ref name, .. } => {
-                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    let c = agent_color(name, &mut color_map, &mut next_color);
                     eprintln!(
                         "    {} {}",
-                        style("+").fg(c),
+                        style("⎿").fg(c),
                         style(name).fg(c).bold(),
                     );
                 }
+
+                // ── Task lifecycle ──────────────────────────────────────
                 AgentEvent::TaskStarted { ref name, ref title, .. } => {
-                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    let c = agent_color(name, &mut color_map, &mut next_color);
                     eprintln!();
                     eprintln!(
-                        "    {} {} {}",
+                        "{} {} {}",
                         name_tag(name, c),
                         style("▸").fg(c),
-                        title,
+                        style(title).white(),
                     );
                 }
                 AgentEvent::Thinking { ref name, ref content, .. } => {
-                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    let c = agent_color(name, &mut color_map, &mut next_color);
                     eprintln!(
-                        "    {} {}",
+                        "{}   {}",
                         name_tag(name, c),
                         style(truncate(content, 80)).dim().italic(),
                     );
@@ -1352,10 +1362,10 @@ async fn main() -> anyhow::Result<()> {
                     ref arguments,
                     ..
                 } => {
-                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    let c = agent_color(name, &mut color_map, &mut next_color);
                     let label = format_tool_label(tool_name, arguments);
                     eprintln!(
-                        "    {} {} {}",
+                        "{}   {} {}",
                         name_tag(name, c),
                         style("⎿").fg(c),
                         label,
@@ -1367,10 +1377,10 @@ async fn main() -> anyhow::Result<()> {
                     ref result_preview,
                     ..
                 } => {
-                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    let c = agent_color(name, &mut color_map, &mut next_color);
                     let preview = format_result_preview(tool_name, result_preview);
                     eprintln!(
-                        "    {}   {}",
+                        "{}     {}",
                         name_tag(name, c),
                         style(&preview).dim(),
                     );
@@ -1381,74 +1391,88 @@ async fn main() -> anyhow::Result<()> {
                     tool_calls,
                     ..
                 } => {
-                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    let c = agent_color(name, &mut color_map, &mut next_color);
                     eprintln!(
-                        "    {} {} {} tokens · {} tools",
+                        "{} {} {} · {} tool {}",
                         name_tag(name, c),
                         style("✓").green(),
-                        format_token_count(tokens_used),
+                        style(format!("{} tokens", format_token_count(tokens_used))).dim(),
                         tool_calls,
+                        if tool_calls == 1 { "use" } else { "uses" },
                     );
                 }
                 AgentEvent::TaskFailed { ref name, ref error, .. } => {
-                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    let c = agent_color(name, &mut color_map, &mut next_color);
                     eprintln!(
-                        "    {} {} {}",
+                        "{} {} {}",
                         name_tag(name, c),
                         style("✗").red(),
-                        style(truncate(error, 60)).red().dim(),
+                        style(truncate(error, 80)).red(),
                     );
                 }
+
+                // ── Plan mode ───────────────────────────────────────────
                 AgentEvent::PlanSubmitted { ref name, ref plan_preview, .. } => {
-                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    let c = agent_color(name, &mut color_map, &mut next_color);
                     eprintln!(
-                        "    {} {} {}",
+                        "{} {} {}",
                         name_tag(name, c),
-                        style("plan").yellow(),
+                        style("📋 plan submitted").yellow(),
                         style(truncate(plan_preview, 60)).dim(),
                     );
                 }
                 AgentEvent::PlanApproved { ref name, .. } => {
-                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    let c = agent_color(name, &mut color_map, &mut next_color);
                     eprintln!(
-                        "    {} {} approved",
+                        "{} {}",
                         name_tag(name, c),
-                        style("plan").green(),
+                        style("✓ plan approved").green(),
                     );
                 }
                 AgentEvent::PlanRejected { ref name, ref feedback, .. } => {
-                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    let c = agent_color(name, &mut color_map, &mut next_color);
                     eprintln!(
-                        "    {} {} rejected: {}",
+                        "{} {} {}",
                         name_tag(name, c),
-                        style("plan").yellow(),
+                        style("✗ plan rejected").yellow(),
                         style(truncate(feedback, 60)).dim(),
                     );
                 }
+
+                // ── Idle / shutdown ──────────────────────────────────────
                 AgentEvent::TeammateIdle { ref name, tasks_completed, .. } => {
-                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    let c = agent_color(name, &mut color_map, &mut next_color);
                     eprintln!(
-                        "    {} {} idle ({} tasks done)",
+                        "{} {} {}",
                         name_tag(name, c),
                         style("…").dim(),
-                        tasks_completed,
+                        style(format!("idle ({} tasks done)", tasks_completed)).dim(),
                     );
                 }
                 AgentEvent::AgentShutdown { ref name, .. } => {
-                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    let c = agent_color(name, &mut color_map, &mut next_color);
                     eprintln!(
-                        "    {} {}",
+                        "{} {}",
                         name_tag(name, c),
                         style("done").dim(),
                     );
                 }
-                AgentEvent::SubAgentSpawned { ref name, .. } => {
-                    let c = teammate_color(name, &mut color_map, &mut next_color);
+
+                // ── Subagent lifecycle ───────────────────────────────────
+                AgentEvent::SubAgentSpawned { ref name, ref description, .. } => {
+                    let c = agent_color(name, &mut color_map, &mut next_color);
+                    let desc = if description.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" — {}", truncate(description, 60))
+                    };
+                    eprintln!();
                     eprintln!(
-                        "    {} {} {}",
+                        "  {} {} {}{}",
                         style("⎿").cyan(),
-                        style("subagent").dim(),
+                        style("Subagent").bold(),
                         style(name).fg(c).bold(),
+                        style(desc).dim(),
                     );
                 }
                 AgentEvent::SubAgentCompleted {
@@ -1458,33 +1482,56 @@ async fn main() -> anyhow::Result<()> {
                     ref final_content,
                     ..
                 } => {
-                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    let c = agent_color(name, &mut color_map, &mut next_color);
                     eprintln!(
-                        "    {} {} {} tokens · {} tools",
+                        "{} {} {} · {} tool {}",
                         name_tag(name, c),
                         style("✓").green(),
-                        format_token_count(tokens_used),
+                        style(format!("{} tokens", format_token_count(tokens_used))).dim(),
                         tool_calls,
+                        if tool_calls == 1 { "use" } else { "uses" },
                     );
                     // Show a brief preview of the result
                     if !final_content.is_empty() {
-                        let preview = truncate(final_content.lines().next().unwrap_or(""), 80);
-                        eprintln!(
-                            "    {}   {}",
-                            name_tag(name, c),
-                            style(preview).dim(),
-                        );
+                        let lines: Vec<&str> = final_content.lines().take(3).collect();
+                        for line in &lines {
+                            eprintln!(
+                                "{}   {}",
+                                name_tag(name, c),
+                                style(truncate(line, 80)).dim(),
+                            );
+                        }
+                        let total_lines = final_content.lines().count();
+                        if total_lines > 3 {
+                            eprintln!(
+                                "{}   {}",
+                                name_tag(name, c),
+                                style(format!("… +{} more lines", total_lines - 3)).dim(),
+                            );
+                        }
                     }
                 }
                 AgentEvent::SubAgentFailed { ref name, ref error, .. } => {
-                    let c = teammate_color(name, &mut color_map, &mut next_color);
+                    let c = agent_color(name, &mut color_map, &mut next_color);
                     eprintln!(
-                        "    {} {} {}",
+                        "{} {} {}",
                         name_tag(name, c),
                         style("✗").red(),
-                        style(truncate(error, 60)).red().dim(),
+                        style(truncate(error, 80)).red(),
                     );
                 }
+
+                // ── Communication ───────────────────────────────────────
+                AgentEvent::TeammateMessage { ref from_name, ref content_preview, .. } => {
+                    let c = agent_color(from_name, &mut color_map, &mut next_color);
+                    eprintln!(
+                        "{}   {} {}",
+                        name_tag(from_name, c),
+                        style("→").fg(c),
+                        style(truncate(content_preview, 60)).dim(),
+                    );
+                }
+
                 _ => {}
             }
         }
