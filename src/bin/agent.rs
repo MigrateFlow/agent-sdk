@@ -18,7 +18,7 @@ use agent_sdk::traits::tool::{Tool, ToolDefinition};
 use agent_sdk::types::chat::ChatMessage;
 use agent_sdk::{AgentEvent, StreamDelta};
 use clap::Parser;
-use console::{style, Term};
+use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -140,67 +140,44 @@ fn print_welcome(model: &str, work_dir: &Path) {
     let branch = git_branch(work_dir);
     let dir = display_path(work_dir);
 
-    let term = Term::stderr();
-    let width = term.size().1 as usize;
-    let box_width = width.min(60).max(40);
-    let inner = box_width - 4; // "│ " + content + " │"
-
-    let bar = "─".repeat(box_width - 2);
-
     eprintln!();
-    eprintln!("  {}{}{}",
-        style("╭").dim(), style(&bar).dim(), style("╮").dim());
-
-    let title = format!("✻ agent v{}", version);
-    let pad = inner.saturating_sub(console::measure_text_width(&title));
-    eprintln!("  {} {}{} {}",
-        style("│").dim(),
-        style(&title).cyan().bold(),
-        " ".repeat(pad),
-        style("│").dim());
-
-    let model_line = format!("model: {}", model);
-    let pad = inner.saturating_sub(model_line.len());
-    eprintln!("  {} {}{} {}",
-        style("│").dim(),
-        style(&model_line).white(),
-        " ".repeat(pad),
-        style("│").dim());
+    eprintln!(
+        " {} {}",
+        style("✻").cyan().bold(),
+        style(format!("Agent v{}", version)).bold(),
+    );
 
     let cwd_line = if let Some(ref b) = branch {
-        format!("cwd:   {} ({})", dir, b)
+        format!("{} ({})", dir, b)
     } else {
-        format!("cwd:   {}", dir)
+        dir
     };
-    let pad = inner.saturating_sub(console::measure_text_width(&cwd_line));
-    eprintln!("  {} {}{} {}",
-        style("│").dim(),
-        &cwd_line,
-        " ".repeat(pad),
-        style("│").dim());
-
-    eprintln!("  {}{}{}",
-        style("╰").dim(), style(&bar).dim(), style("╯").dim());
-
+    eprintln!("   {} {}", style("cwd:").dim(), cwd_line);
+    eprintln!("   {} {}", style("model:").dim(), model);
     eprintln!();
-    eprintln!("  {}", style("/help for commands · Ctrl+C to cancel").dim());
+    eprintln!(
+        "   {}",
+        style("Type /help for commands · Ctrl+C to interrupt · Ctrl+C twice to quit").dim()
+    );
     eprintln!();
 }
 
 fn print_help() {
     eprintln!();
-    eprintln!("  {}", style("Slash commands").bold().underlined());
-    eprintln!("    {}     Clear conversation & start fresh", style("/clear").cyan());
-    eprintln!("    {}    Compact conversation with dynamic strategy", style("/compact").cyan());
-    eprintln!("    {}     Show current task list", style("/tasks").cyan());
-    eprintln!("    {}      Show session info", style("/cost").cyan());
-    eprintln!("    {}      Show this help", style("/help").cyan());
-    eprintln!("    {}      Exit", style("/quit").cyan());
+    eprintln!("  {}", style("Commands").bold());
     eprintln!();
-    eprintln!("  {}", style("Tips").bold().underlined());
+    eprintln!("    {}       clear conversation and start fresh", style("/clear").cyan());
+    eprintln!("    {}     compact context to free up space", style("/compact").cyan());
+    eprintln!("    {}       show current task list", style("/tasks").cyan());
+    eprintln!("    {}        show session stats & token usage", style("/cost").cyan());
+    eprintln!("    {}        show this help", style("/help").cyan());
+    eprintln!("    {}        exit the agent", style("/quit").cyan());
+    eprintln!();
+    eprintln!("  {}", style("Tips").bold());
+    eprintln!();
     eprintln!("    End a line with {} for multi-line input", style("\\").cyan());
-    eprintln!("    {} interrupts the current generation", style("Ctrl+C").cyan());
-    eprintln!("    Use {} for one-shot mode", style("agent \"your prompt\"").cyan());
+    eprintln!("    {} to interrupt, press twice to force-quit", style("Ctrl+C").cyan());
+    eprintln!("    {} for one-shot mode", style("agent \"your prompt\"").cyan());
     eprintln!();
 }
 
@@ -209,7 +186,7 @@ fn create_spinner(msg: &str) -> ProgressBar {
     pb.set_style(
         ProgressStyle::default_spinner()
             .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
-            .template("  {spinner:.cyan} {msg}")
+            .template("  {spinner:.dim} {msg:.dim}")
             .unwrap(),
     );
     pb.set_message(msg.to_string());
@@ -224,44 +201,59 @@ fn format_tool_label(tool_name: &str, arguments: &str) -> String {
     match tool_name {
         "read_file" => {
             let path = arg_str(&args, "path").unwrap_or("?");
-            format!("Read {}", style(path).white())
+            format!("{} {}", style("Read").bold(), style(path).cyan())
         }
         "write_file" => {
             let path = arg_str(&args, "path").unwrap_or("?");
-            format!("Write {}", style(path).white())
+            format!("{} {}", style("Write").bold(), style(path).cyan())
         }
         "list_directory" => {
             let path = arg_str(&args, "path").unwrap_or(".");
-            format!("List {}", style(path).white())
+            format!("{} {}", style("List").bold(), style(path).cyan())
         }
         "search_files" => {
-            let pattern = arg_str(&args, "file_pattern")
-                .or_else(|| arg_str(&args, "content_pattern"))
-                .unwrap_or("files");
-            format!("Search {}", style(pattern).white())
+            let file_pat = arg_str(&args, "file_pattern");
+            let content_pat = arg_str(&args, "content_pattern");
+            match (file_pat, content_pat) {
+                (Some(fp), Some(cp)) => {
+                    format!("{} {} for {}", style("Search").bold(), style(fp).cyan(), style(format!("\"{}\"", cp)).white())
+                }
+                (Some(fp), None) => {
+                    format!("{} {}", style("Search").bold(), style(fp).cyan())
+                }
+                (None, Some(cp)) => {
+                    format!("{} {}", style("Search").bold(), style(format!("\"{}\"", cp)).white())
+                }
+                _ => format!("{}", style("Search").bold()),
+            }
         }
         "web_search" => {
             let query = arg_str(&args, "query").unwrap_or("web");
-            format!("Web search {}", style(query).white())
+            format!("{} \"{}\"", style("Web Search").bold(), style(query).white())
         }
         "run_command" => {
             let cmd = arg_str(&args, "command").unwrap_or("?");
-            let short = if cmd.len() > 60 { &cmd[..60] } else { cmd };
-            format!("$ {}", style(short).white())
+            let short = if cmd.len() > 80 { &cmd[..80] } else { cmd };
+            format!("{}", style(format!("$ {}", short)).white())
         }
-        "spawn_agent_team" => "Spawning agent team…".to_string(),
+        "spawn_agent_team" => {
+            format!("{}", style("Spawn Agent Team").bold().magenta())
+        }
         "spawn_subagent" => {
             let name = arg_str(&args, "name").unwrap_or("subagent");
             let bg = args.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
             if bg {
-                format!("Spawning subagent {} (background)…", style(name).white().bold())
+                format!("{} {} {}", style("Spawn Subagent").bold(), style(name).cyan().bold(), style("(background)").dim())
             } else {
-                format!("Spawning subagent {}…", style(name).white().bold())
+                format!("{} {}", style("Spawn Subagent").bold(), style(name).cyan().bold())
             }
+        }
+        "update_task_list" => {
+            format!("{}", style("Update Task List").bold())
         }
         _ => {
             let name = humanize(tool_name);
-            format!("{}", name)
+            format!("{}", style(name).bold())
         }
     }
 }
@@ -270,18 +262,29 @@ fn format_tool_label(tool_name: &str, arguments: &str) -> String {
 fn format_result_preview(tool_name: &str, result: &str) -> String {
     let val: serde_json::Value = serde_json::from_str(result).unwrap_or_default();
 
+    // Check for error first
+    if let Some(err) = val["error"].as_str() {
+        return format!("{} {}", style("✗").red(), style(truncate(err, 80)).red());
+    }
+
     match tool_name {
         "read_file" => {
             let lines = val["lines"].as_u64().unwrap_or(0);
-            format!("{} lines", lines)
+            let lines_returned = val["lines_returned"].as_u64().unwrap_or(lines);
+            if lines_returned < lines {
+                format!("{} lines (showing {})", lines, lines_returned)
+            } else {
+                format!("{} lines", lines)
+            }
         }
         "write_file" => {
             let written = val["lines_written"].as_u64().unwrap_or(0);
-            format!("{} lines written", written)
+            let bytes = val["bytes_written"].as_u64().unwrap_or(0);
+            format!("{} lines · {} bytes written", written, bytes)
         }
         "list_directory" => {
             let count = val["count"].as_u64().unwrap_or(0);
-            format!("{} entries", count)
+            format!("{} items", count)
         }
         "search_files" => {
             if let Some(n) = val["files_with_matches"].as_u64() {
@@ -294,18 +297,23 @@ fn format_result_preview(tool_name: &str, result: &str) -> String {
         }
         "web_search" => {
             let count = val["count"].as_u64().unwrap_or(0);
-            format!("{} web results", count)
+            format!("{} results", count)
         }
         "run_command" => {
             let code = val["exit_code"].as_i64().unwrap_or(-1);
             if code == 0 {
                 let stdout = val["stdout"].as_str().unwrap_or("");
                 let lines = stdout.lines().count();
-                format!("exit 0 ({} lines)", lines)
+                format!("{} ({} lines)", style("✓").green(), lines)
             } else {
                 let stderr = val["stderr"].as_str().unwrap_or("");
                 let first_line = stderr.lines().next().unwrap_or("failed");
-                format!("exit {} — {}", code, truncate(first_line, 60))
+                format!(
+                    "{} exit {} — {}",
+                    style("✗").red(),
+                    code,
+                    truncate(first_line, 60)
+                )
             }
         }
         "spawn_agent_team" => {
@@ -320,22 +328,22 @@ fn format_result_preview(tool_name: &str, result: &str) -> String {
             let tokens = val["total_tokens"].as_u64().unwrap_or(0);
             let tool_calls = val["tool_calls"].as_u64().unwrap_or(0);
             if status == "background" {
-                format!("{} started in background", name)
+                format!("{} launched in background", name)
             } else {
-                format!("{} {} ({} tokens, {} tools)", name, status, format_token_count(tokens), tool_calls)
+                format!(
+                    "{} {} · {} tokens · {} tools",
+                    name,
+                    status,
+                    format_token_count(tokens),
+                    tool_calls
+                )
             }
         }
         "update_task_list" => {
             let count = val["count"].as_u64().unwrap_or(0);
-            format!("{} tasks updated", count)
+            format!("{} tasks", count)
         }
-        _ => {
-            if let Some(err) = val["error"].as_str() {
-                format!("error: {}", truncate(err, 60))
-            } else {
-                truncate(result, 60)
-            }
-        }
+        _ => truncate(result, 80),
     }
 }
 
@@ -425,12 +433,12 @@ fn print_team_result_summary(result: &str) {
     eprintln!();
 }
 
-fn task_status_symbol(status: &str) -> &'static str {
+fn task_status_display(status: &str) -> (console::StyledObject<&'static str>, console::Color) {
     match status {
-        "completed" => "✓",
-        "in_progress" => "→",
-        "blocked" => "!",
-        _ => "•",
+        "completed" => (style("✓").green(), console::Color::Green),
+        "in_progress" => (style("◐").cyan(), console::Color::Cyan),
+        "blocked" => (style("!").red(), console::Color::Red),
+        _ => (style("○").dim(), console::Color::White),
     }
 }
 
@@ -439,17 +447,23 @@ fn print_task_list(tasks: &[CliTask]) {
         return;
     }
 
-    eprintln!("  {}", style("Task List").cyan().bold());
-    for (idx, task) in tasks.iter().enumerate() {
+    let completed = tasks.iter().filter(|t| t.status == "completed").count();
+    let total = tasks.len();
+
+    eprintln!(
+        "  {} ({}/{})",
+        style("Tasks").bold(),
+        completed,
+        total,
+    );
+    for task in tasks.iter() {
+        let (symbol, color) = task_status_display(&task.status);
         eprintln!(
-            "    {} {} {} {}",
-            style(format!("{}. ", idx + 1)).cyan(),
-            style(task_status_symbol(&task.status)).cyan(),
-            style(&task.title).white(),
-            style(format!("[{}]", task.status)).dim(),
+            "    {} {}",
+            symbol,
+            style(&task.title).fg(color),
         );
     }
-    eprintln!();
 }
 
 fn arg_str<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
@@ -826,7 +840,7 @@ async fn run_turn(
         if interrupt.load(Ordering::Relaxed) {
             interrupt.store(false, Ordering::Relaxed);
             if !json_mode {
-                eprintln!("\n  {}", style("⏎ Cancelled").yellow());
+                eprintln!("\n  {}", style("Interrupted").yellow());
             }
             return Ok(TurnStats {
                 tokens: total_tokens,
@@ -837,41 +851,51 @@ async fn run_turn(
 
         let spinner = if json_mode { None } else { Some(create_spinner("Thinking…")) };
 
-        let result = if json_mode {
-            // Streaming mode: emit text_delta events as tokens arrive
-            let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel::<StreamDelta>();
-            let llm_fut = llm_client.chat_stream(messages, &tool_defs, delta_tx);
+        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel::<StreamDelta>();
+        let llm_fut = llm_client.chat_stream(messages, &tool_defs, delta_tx);
 
-            // Drain deltas in background, emitting NDJSON as they arrive
-            let emit_handle = tokio::spawn(async move {
-                while let Some(delta) = delta_rx.recv().await {
-                    match delta {
-                        StreamDelta::Text(text) => {
+        let is_json = json_mode;
+        let emit_handle = tokio::spawn(async move {
+            let mut streaming_started = false;
+            while let Some(delta) = delta_rx.recv().await {
+                match delta {
+                    StreamDelta::Text(text) => {
+                        if is_json {
                             emit_ndjson(&NdjsonEvent::TextDelta { content: text });
-                        }
-                        StreamDelta::Thinking(text) => {
-                            // Thinking text will be emitted after we know the iteration
-                            // For now, buffer it — it's emitted by the main loop below
-                            let _ = text;
+                        } else {
+                            if !streaming_started {
+                                streaming_started = true;
+                                // Start the response text on a new line
+                                eprint!("\r\x1b[K");
+                            }
+                            eprint!("{}", text);
+                            let _ = io::stderr().flush();
                         }
                     }
+                    StreamDelta::Thinking(_) => {
+                        // Thinking text is handled after the response completes
+                    }
                 }
-            });
+            }
+            streaming_started
+        });
 
-            let res = llm_fut.await;
-            let _ = emit_handle.await;
-            res
-        } else {
-            llm_client.chat(messages, &tool_defs).await
-        };
+        let result = llm_fut.await;
+        let streamed = emit_handle.await.unwrap_or(false);
 
-        if let Some(s) = spinner { s.finish_and_clear(); }
+        if let Some(s) = &spinner {
+            if !streamed {
+                s.finish_and_clear();
+            } else {
+                s.finish_and_clear();
+            }
+        }
 
         // Check interrupt after call returns
         if interrupt.load(Ordering::Relaxed) {
             interrupt.store(false, Ordering::Relaxed);
             if !json_mode {
-                eprintln!("  {}", style("⏎ Cancelled").yellow());
+                eprintln!("  {}", style("Interrupted").yellow());
             }
             return Ok(TurnStats {
                 tokens: total_tokens,
@@ -897,14 +921,37 @@ async fn run_turn(
                                 iteration,
                             });
                         } else {
-                            eprintln!("  {}", style(truncate(text, 200)).dim().italic());
+                            // Clear the spinner line if streaming was active
+                            if streamed {
+                                eprint!("\r\x1b[K");
+                            }
+                            // Show thinking in a subtle way like Claude Code
+                            let thinking_lines: Vec<&str> = text.lines().collect();
+                            let show_lines = thinking_lines.len().min(3);
+                            for line in &thinking_lines[..show_lines] {
+                                eprintln!(
+                                    "  {} {}",
+                                    style("│").dim(),
+                                    style(truncate(line, 100)).dim().italic()
+                                );
+                            }
+                            if thinking_lines.len() > show_lines {
+                                eprintln!(
+                                    "  {} {}",
+                                    style("│").dim(),
+                                    style(format!("… +{} more lines", thinking_lines.len() - show_lines)).dim()
+                                );
+                            }
                         }
                     }
                 }
 
                 messages.push(response.clone());
 
-                for tc in tool_calls {
+                let tc_count = tool_calls.len();
+                for (tc_idx, tc) in tool_calls.iter().enumerate() {
+                    let is_last_tc = tc_idx == tc_count - 1;
+
                     if json_mode {
                         emit_ndjson(&NdjsonEvent::ToolCall {
                             tool_call_id: tc.id.clone(),
@@ -918,6 +965,35 @@ async fn run_turn(
 
                         if tc.function.name == "spawn_agent_team" {
                             print_team_plan(&tc.function.arguments);
+                        }
+
+                        // Show write_file content preview
+                        if tc.function.name == "write_file" {
+                            let args: serde_json::Value =
+                                serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                            if let Some(content) = args["content"].as_str() {
+                                let lines: Vec<&str> = content.lines().collect();
+                                let show = lines.len().min(8);
+                                for (i, line) in lines[..show].iter().enumerate() {
+                                    let prefix = if i == show - 1 && is_last_tc {
+                                        "  ⎿"
+                                    } else {
+                                        "  │"
+                                    };
+                                    eprintln!(
+                                        "  {} {}",
+                                        style(prefix).dim(),
+                                        style(truncate(line, 100)).dim()
+                                    );
+                                }
+                                if lines.len() > show {
+                                    eprintln!(
+                                        "  {} {}",
+                                        style("  │").dim(),
+                                        style(format!("… +{} more lines", lines.len() - show)).dim()
+                                    );
+                                }
+                            }
                         }
                     }
 
@@ -956,9 +1032,6 @@ async fn run_turn(
                     messages.push(ChatMessage::tool_result(&tc.id, &result_content));
                     tool_calls_count += 1;
                 }
-                if !json_mode {
-                    eprintln!();
-                }
             }
 
             ChatMessage::Assistant { ref content, .. } => {
@@ -966,19 +1039,21 @@ async fn run_turn(
                 messages.push(response);
 
                 if json_mode {
-                    // Text was already streamed via text_delta events from chat_stream.
-                    // Only emit Completed with the final content for fallback.
                     emit_ndjson(&NdjsonEvent::Completed {
                         final_content: answer,
                         tokens_used: total_tokens,
                         iterations: iteration + 1,
                         tool_calls: tool_calls_count,
                     });
+                } else if streamed {
+                    // Text was already streamed to stderr — just add newlines
+                    eprintln!();
+                    eprintln!();
                 } else {
-                    // Print final answer
+                    // Fallback: print the full answer
                     eprintln!();
                     for line in answer.lines() {
-                        println!("{}", line);
+                        eprintln!("{}", line);
                     }
                     eprintln!();
                 }
@@ -995,16 +1070,18 @@ async fn run_turn(
                 messages.push(other);
 
                 if json_mode {
-                    // Text was already streamed, just emit Completed
                     emit_ndjson(&NdjsonEvent::Completed {
                         final_content: text,
                         tokens_used: total_tokens,
                         iterations: iteration + 1,
                         tool_calls: tool_calls_count,
                     });
+                } else if !streamed {
+                    eprintln!();
+                    eprintln!("{}", text);
+                    eprintln!();
                 } else {
                     eprintln!();
-                    println!("{}", text);
                     eprintln!();
                 }
 
@@ -1022,8 +1099,9 @@ async fn run_turn(
             error: format!("max iterations ({}) reached", max_iterations),
         });
     } else {
+        eprintln!();
         eprintln!(
-            "  {} max iterations ({}) reached",
+            "  {} Max iterations ({}) reached",
             style("⚠").yellow(),
             max_iterations,
         );
@@ -1492,13 +1570,16 @@ async fn main() -> anyhow::Result<()> {
                 *current = session.tasks;
             }
             eprintln!(
-                "  {} restored ({} messages)",
+                "   {} Session restored ({} messages)",
                 style("↻").green(),
                 style(n).dim(),
             );
-            eprintln!();
             let current = tasks.lock().expect("task list mutex poisoned").clone();
-            print_task_list(&current);
+            if !current.is_empty() {
+                eprintln!();
+                print_task_list(&current);
+            }
+            eprintln!();
             session.messages
         }
         None => {
@@ -1510,8 +1591,14 @@ async fn main() -> anyhow::Result<()> {
     let mut session_tool_calls = 0usize;
     let mut session_turns = 0usize;
 
+    // Derive project name from the work directory for the prompt
+    let project_name = work_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "agent".to_string());
+
     loop {
-        eprint!("{} ", style("❯").cyan().bold());
+        eprint!("{} {} ", style(&project_name).dim(), style(">").cyan().bold());
         io::stderr().flush()?;
 
         let input = read_input()?;
@@ -1539,7 +1626,7 @@ async fn main() -> anyhow::Result<()> {
                 session_tokens = 0;
                 session_tool_calls = 0;
                 session_turns = 0;
-                eprintln!("  {}", style("Conversation cleared.").dim());
+                eprintln!("  {} {}", style("✓").green(), style("Conversation cleared").dim());
                 eprintln!();
                 continue;
             }
@@ -1552,8 +1639,8 @@ async fn main() -> anyhow::Result<()> {
                     &tasks.lock().expect("task list mutex poisoned"),
                 )?;
                 eprintln!(
-                    "  {} compacted {} messages using {} strategy ({} remaining)",
-                    style("↻").green(),
+                    "  {} Compacted {} messages ({} strategy, {} remaining)",
+                    style("✓").green(),
                     freed,
                     style(strategy).dim(),
                     messages.len(),
@@ -1563,20 +1650,25 @@ async fn main() -> anyhow::Result<()> {
             }
 
             "/cost" | "/status" => {
+                eprintln!();
                 eprintln!(
                     "  {} {}",
-                    style("session").white().bold(),
+                    style("Session").bold(),
                     style(&display_path(&session_path)).dim(),
                 );
                 eprintln!(
-                    "  {} turns · {} tokens · {} tool calls · {} messages",
-                    style(session_turns).white(),
-                    style(format_token_count(session_tokens)).white(),
+                    "    {} · {} · {} tool {} · {} messages",
+                    style(format!("{} turns", session_turns)).white(),
+                    style(format!("{} tokens", format_token_count(session_tokens))).white(),
                     style(session_tool_calls).white(),
+                    if session_tool_calls == 1 { "use" } else { "uses" },
                     style(messages.len()).dim(),
                 );
                 let current = tasks.lock().expect("task list mutex poisoned").clone();
-                print_task_list(&current);
+                if !current.is_empty() {
+                    eprintln!();
+                    print_task_list(&current);
+                }
                 eprintln!();
                 continue;
             }
@@ -1594,11 +1686,11 @@ async fn main() -> anyhow::Result<()> {
 
             cmd if cmd.starts_with('/') => {
                 eprintln!(
-                    "  {} unknown command: {}",
+                    "  {} Unknown command: {}  (type {} for help)",
                     style("?").yellow(),
-                    style(cmd).dim(),
+                    style(cmd).white(),
+                    style("/help").cyan(),
                 );
-                eprintln!("  {}", style("Type /help for available commands").dim());
                 eprintln!();
                 continue;
             }
@@ -1639,33 +1731,36 @@ async fn main() -> anyhow::Result<()> {
 
     eprintln!();
     eprintln!(
-        "  {} {} turns · {} tokens · {} tool calls",
-        style("session").dim(),
-        session_turns,
-        format_token_count(session_tokens),
-        session_tool_calls,
+        "  {} {} · {} · {} tool {}",
+        style("Session:").dim(),
+        style(format!("{} turns", session_turns)).dim(),
+        style(format!("{} tokens", format_token_count(session_tokens))).dim(),
+        style(session_tool_calls).dim(),
+        if session_tool_calls == 1 { "use" } else { "uses" },
     );
     eprintln!();
     Ok(())
 }
 
-fn print_usage(stats: &TurnStats) {
-    let duration = if stats.duration.as_secs() >= 60 {
-        format!("{}m{:.0}s", stats.duration.as_secs() / 60, stats.duration.as_secs() % 60)
+fn format_duration(d: std::time::Duration) -> String {
+    if d.as_secs() >= 60 {
+        format!("{}m{:.0}s", d.as_secs() / 60, d.as_secs() % 60)
     } else {
-        format!("{:.1}s", stats.duration.as_secs_f64())
-    };
+        format!("{:.1}s", d.as_secs_f64())
+    }
+}
 
-    eprintln!(
-        "  {}",
-        style(format!(
-            "{} tokens · {} tool calls · {}",
-            format_token_count(stats.tokens),
-            stats.tool_calls,
-            duration,
-        ))
-        .dim(),
-    );
+fn print_usage(stats: &TurnStats) {
+    let duration = format_duration(stats.duration);
+
+    // Compact one-line stats like Claude Code
+    let parts: Vec<String> = vec![
+        format!("{} tokens", format_token_count(stats.tokens)),
+        format!("{} tool {}", stats.tool_calls, if stats.tool_calls == 1 { "use" } else { "uses" }),
+        duration,
+    ];
+
+    eprintln!("  {}", style(parts.join(" · ")).dim());
     eprintln!();
 }
 
