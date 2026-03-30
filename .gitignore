@@ -21,3 +21,4 @@ target
 #.idea/
 
 .agent/settings.local.json
+.env
