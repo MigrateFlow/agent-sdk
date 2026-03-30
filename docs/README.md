@@ -21,11 +21,11 @@ Use these documents in this order:
 - LLM providers: Anthropic Claude and OpenAI
 - Built-in runtime modes: single-agent and multi-agent team orchestration
 - Built-in tools: file read/write, directory listing, search, shell commands, shared memory, task context, and team spawning
-- Persistence model: file-backed tasks, mailboxes, and memory in the working directory
+- Persistence model: project-shared `.agent/` config plus user-local runtime state under `~/.agent/`
 
 ## Important Current Behavior
 
 - `AgentTeam::run(...)` executes the tasks you add with `add_task(...)`. The `goal` string is accepted but is not currently used by the orchestration logic.
 - `AgentTeam::run_single(...)` is the simplest programmatic entrypoint for one-agent work.
 - The CLI is separate from `AgentTeam`. It uses a conversational loop and can dynamically call `spawn_agent_team`.
-- Team infrastructure is written under `.agent/` inside the configured working directory.
+- Team infrastructure is written under `~/.agent/teams/<team-name>/` and `~/.agent/tasks/<team-name>/`, while `.agent/` in the repo is reserved for shared config files.

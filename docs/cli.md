@@ -96,7 +96,7 @@ Interactive mode supports:
 
 Session behavior:
 
-- interactive mode now persists conversation history by default at `<workdir>/.agent/cli-session.json`
+- interactive mode now persists conversation history by default at `~/.agent/projects/<project>/sessions/cli-session.json`
 - the current single-agent `Task` list is persisted in the same session file
 - restarting the CLI in the same working directory resumes that conversation if the system prompt matches
 - `/clear` and `/new` both reset the session back to the system prompt only

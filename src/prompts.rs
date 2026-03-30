@@ -119,6 +119,33 @@ pub fn single_agent_system_prompt(source_root: &Path, work_dir: &Path) -> String
     )
 }
 
+/// System prompt for a subagent.
+///
+/// The subagent's custom prompt replaces the default system prompt entirely,
+/// but we wrap it with environment context.
+pub fn subagent_system_prompt(
+    custom_prompt: &str,
+    source_root: &Path,
+    work_dir: &Path,
+) -> String {
+    format!(
+        r#"{custom_prompt}
+
+## Environment
+- Source directory: {source}
+- Working directory: {work_dir}
+
+## Important
+- You are a subagent running in an isolated context window.
+- Complete the delegated task and return a concise result summary.
+- You CANNOT spawn other subagents or agent teams.
+- Be thorough but efficient — your results will be returned to the parent agent."#,
+        custom_prompt = custom_prompt,
+        source = source_root.display(),
+        work_dir = work_dir.display(),
+    )
+}
+
 /// Suffix appended to the system prompt when a teammate has a role.
 pub fn teammate_role_suffix(role_prompt: &str) -> String {
     format!(

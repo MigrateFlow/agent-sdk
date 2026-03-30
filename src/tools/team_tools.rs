@@ -13,6 +13,7 @@ use crate::agent::team_lead::{TeamLead, TeammateSpec};
 use crate::config::AgentConfig;
 use crate::error::{SdkError, SdkResult};
 use crate::mailbox::broker::MessageBroker;
+use crate::storage::AgentPaths;
 use crate::task::store::TaskStore;
 use crate::traits::llm_client::LlmClient;
 use crate::traits::prompt_builder::DefaultPromptBuilder;
@@ -135,16 +136,18 @@ impl Tool for SpawnAgentTeamTool {
             }));
         }
 
-        // Set up team infrastructure in a hidden subdirectory,
-        // but teammates write output to the actual work_dir.
-        let infra_dir = self.work_dir.join(crate::config::AGENT_DIR);
-        tokio::fs::create_dir_all(&infra_dir).await.map_err(SdkError::Io)?;
+        let paths = AgentPaths::for_work_dir(&self.work_dir)?;
+        let team_name = paths.new_team_name();
+        let team_config_path = paths.team_config_path(&team_name);
+        tokio::fs::create_dir_all(paths.team_dir(&team_name))
+            .await
+            .map_err(SdkError::Io)?;
 
-        let task_store = Arc::new(TaskStore::new(infra_dir.clone()));
+        let task_store = Arc::new(TaskStore::new(paths.team_tasks_dir(&team_name)));
         task_store.init()?;
 
-        let broker = Arc::new(MessageBroker::new(infra_dir.join("mailbox"))?);
-        let memory = Arc::new(MemoryStore::new(infra_dir.join("memory"))?);
+        let broker = Arc::new(MessageBroker::new(paths.team_mailbox_dir(&team_name))?);
+        let memory = Arc::new(MemoryStore::new(paths.team_memory_dir(&team_name))?);
 
         // Create tasks, resolving dependency indices to TaskIds
         let mut created_tasks: Vec<Task> = Vec::new();
@@ -205,6 +208,8 @@ impl Tool for SpawnAgentTeamTool {
         // Run the team lead
         let lead = TeamLead {
             id: Uuid::new_v4(),
+            team_name: team_name.clone(),
+            team_config_path,
             task_store,
             broker,
             llm_client: self.llm_client.clone(),
@@ -226,6 +231,7 @@ impl Tool for SpawnAgentTeamTool {
         match lead.run().await {
             Ok(summary) => Ok(json!({
                 "status": "completed",
+                "team_name": team_name,
                 "teammates": teammate_names,
                 "tasks": task_titles,
                 "task_assignments": task_assignments,
@@ -238,6 +244,7 @@ impl Tool for SpawnAgentTeamTool {
             Err(e) => Ok(json!({
                 "status": "failed",
                 "error": e.to_string(),
+                "team_name": team_name,
                 "teammates": teammate_names,
                 "tasks_created": task_count
             })),

@@ -8,11 +8,13 @@ pub mod mailbox;
 pub mod agent;
 pub mod tools;
 pub mod prompts;
+pub mod storage;
 
 // Convenience re-exports
 pub use error::{AgentId, TaskId, SdkError, SdkResult};
 pub use config::{LlmConfig, LlmProvider, AgentConfig, AGENT_DIR};
 pub use agent::agent_loop::AgentLoop;
+pub use agent::subagent::{SubAgentDef, SubAgentRegistry, SubAgentResult, SubAgentRunner};
 pub use agent::team::AgentTeam;
 pub use agent::team_lead::{TeamLead, ExecutionSummary, TeammateSpec};
 pub use agent::teammate::Teammate;
@@ -26,3 +28,4 @@ pub use traits::tool::{Tool, ToolDefinition};
 pub use types::chat::ChatMessage;
 pub use types::task::{Task, TaskResult, TaskStatus};
 pub use llm::create_client;
+pub use storage::AgentPaths;

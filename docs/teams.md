@@ -156,32 +156,45 @@ Relevant events:
 
 ## Shared Infrastructure On Disk
 
-Team runtime data is written beneath `.agent/` inside `work_dir`.
+The runtime layout now follows the Claude Code agent-team model:
 
-Current layout:
+- project-local `.agent/` is for shared config checked into the repo
+- team config lives under `~/.agent/teams/<team-name>/config.json`
+- shared task state lives under `~/.agent/tasks/<team-name>/`
+- other mutable team resources stay under the same `~/.agent/teams/<team-name>/` team directory
+
+Current runtime layout:
+
+```text
+~/.agent/
+  settings.json
+  teams/
+    <team-name>/
+      config.json
+      mailbox/
+        team-lead/
+          inbox.jsonl
+          inbox.lock
+        agents/
+          <agent-id>/
+            inbox.jsonl
+            inbox.lock
+      memory/
+        <key>.json
+  tasks/
+    <team-name>/
+      pending/
+      in_progress/
+      completed/
+      failed/
+```
+
+Project-local config layout:
 
 ```text
 .agent/
-  mailbox/
-    team-lead/
-      inbox.jsonl
-      inbox.lock
-    agents/
-      <agent-id>/
-        inbox.jsonl
-        inbox.lock
-  memory/
-    <key>.json
-```
-
-Tasks are stored separately under `work_dir/tasks/`:
-
-```text
-tasks/
-  pending/
-  in_progress/
-  completed/
-  failed/
+  settings.json
+  settings.local.json
 ```
 
 Each task is persisted as JSON, with a `.lock` file used during claiming.
@@ -202,7 +215,7 @@ Example payloads:
 { "key": "style-guide", "value": { "tone": "concise", "format": "markdown" } }
 ```
 
-Keys are stored as JSON files under `.agent/memory/`.
+Keys are stored as JSON files under `~/.agent/teams/<team-name>/memory/`.
 
 ## Task Context Tools
 

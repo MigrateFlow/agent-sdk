@@ -8,8 +8,9 @@ use crate::types::task::{Task, TaskResult, TaskStatus};
 
 use super::file_lock::FileLock;
 
-/// File-backed task store. Tasks live in status-based directories:
-/// `{base}/tasks/{pending,in_progress,completed,failed}/{task_id}.json`
+/// File-backed task store. Tasks live in status-based directories beneath
+/// the configured base directory:
+/// `{base}/{pending,in_progress,completed,failed}/{task_id}.json`
 pub struct TaskStore {
     base_dir: PathBuf,
 }
@@ -27,7 +28,7 @@ impl TaskStore {
     }
 
     fn tasks_dir(&self) -> PathBuf {
-        self.base_dir.join("tasks")
+        self.base_dir.clone()
     }
 
     fn task_path(&self, status_dir: &str, task_id: TaskId) -> PathBuf {

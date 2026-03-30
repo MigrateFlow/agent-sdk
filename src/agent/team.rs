@@ -9,6 +9,7 @@ use crate::error::SdkResult;
 use crate::traits::llm_client::LlmClient;
 use crate::traits::prompt_builder::{DefaultPromptBuilder, PromptBuilder};
 use crate::mailbox::broker::MessageBroker;
+use crate::storage::AgentPaths;
 use crate::task::store::TaskStore;
 use crate::types::task::Task;
 
@@ -203,9 +204,12 @@ impl AgentTeam {
             Some(c) => c,
             None => crate::llm::create_client(&self.llm_config)?,
         };
+        let paths = AgentPaths::for_work_dir(&self.work_dir)?;
+        let team_name = paths.new_team_name();
+        let team_config_path = paths.team_config_path(&team_name);
 
         let hooks = Arc::new(std::mem::take(&mut self.hooks));
-        let task_store = Arc::new(TaskStore::new(self.work_dir.clone()));
+        let task_store = Arc::new(TaskStore::new(paths.team_tasks_dir(&team_name)));
         task_store.init()?;
 
         // Add tasks to the store
@@ -223,13 +227,14 @@ impl AgentTeam {
             task_store.create_task(task)?;
         }
 
-        let infra_dir = self.work_dir.join(crate::config::AGENT_DIR);
-        std::fs::create_dir_all(&infra_dir).map_err(crate::error::SdkError::Io)?;
-        let broker = Arc::new(MessageBroker::new(infra_dir.join("mailbox"))?);
-        let memory = Arc::new(MemoryStore::new(infra_dir.join("memory"))?);
+        std::fs::create_dir_all(paths.team_dir(&team_name)).map_err(crate::error::SdkError::Io)?;
+        let broker = Arc::new(MessageBroker::new(paths.team_mailbox_dir(&team_name))?);
+        let memory = Arc::new(MemoryStore::new(paths.team_memory_dir(&team_name))?);
 
         let lead = TeamLead {
             id: Uuid::new_v4(),
+            team_name,
+            team_config_path,
             task_store,
             broker,
             llm_client: client,

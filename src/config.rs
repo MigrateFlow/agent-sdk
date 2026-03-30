@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-/// Well-known directory name used for team infrastructure (task store,
-/// mailbox, memory) inside the working directory.
+/// Well-known project-local config directory name, analogous to `.claude/`.
+/// Mutable runtime state is stored separately under `~/.agent/projects/...`.
 pub const AGENT_DIR: &str = ".agent";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

@@ -6,3 +6,4 @@ pub mod search_tools;
 pub mod web_tools;
 pub mod context_tools;
 pub mod team_tools;
+pub mod subagent_tools;

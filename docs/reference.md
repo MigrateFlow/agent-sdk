@@ -32,6 +32,7 @@ From [src/lib.rs](/Users/ThangLT4/Desktop/code/rust-agent-sdk/src/lib.rs):
 - `LlmProvider`
 - `AgentConfig`
 - `AGENT_DIR`
+- `AgentPaths`
 - `AgentId`
 - `TaskId`
 - `SdkError`
@@ -279,10 +280,11 @@ Team tools:
 
 ## Persistent Components
 
-- `TaskStore`: file-backed tasks under `tasks/`
+- `AgentPaths`: resolves project-local `.agent/` config paths plus Claude-style team runtime paths under `~/.agent/teams/<team-name>/` and `~/.agent/tasks/<team-name>/`
+- `TaskStore`: file-backed tasks under the configured team task directory
 - `MessageBroker`: routes `Envelope` values to mailboxes
 - `Mailbox`: JSONL inbox with file locking
-- `MemoryStore`: JSON-backed shared key-value storage
+- `MemoryStore`: JSON-backed shared key-value storage under the configured team directory
 
 ## Errors
 

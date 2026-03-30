@@ -4,6 +4,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+use serde::Serialize;
 
 use crate::config::AgentConfig;
 use crate::error::{AgentId, SdkResult};
@@ -34,6 +35,8 @@ pub struct TeammateSpec {
 
 pub struct TeamLead {
     pub id: AgentId,
+    pub team_name: String,
+    pub team_config_path: std::path::PathBuf,
     pub task_store: Arc<TaskStore>,
     pub broker: Arc<MessageBroker>,
     pub llm_client: Arc<dyn LlmClient>,
@@ -49,6 +52,23 @@ pub struct TeamLead {
     pub teammate_specs: Vec<TeammateSpec>,
 }
 
+#[derive(Debug, Serialize)]
+struct TeamConfigFile {
+    team_name: String,
+    lead_id: AgentId,
+    work_dir: std::path::PathBuf,
+    source_root: std::path::PathBuf,
+    members: Vec<TeamConfigMember>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TeamConfigMember {
+    name: String,
+    agent_id: AgentId,
+    agent_type: String,
+    require_plan_approval: bool,
+}
+
 #[derive(Debug)]
 pub struct ExecutionSummary {
     pub total_tasks: usize,
@@ -61,12 +81,14 @@ pub struct ExecutionSummary {
 impl TeamLead {
     pub async fn run(&self) -> SdkResult<ExecutionSummary> {
         info!(lead_id = %self.id, "Team lead starting orchestration");
+        self.write_team_config(&[])?;
 
         let mut registry = AgentRegistry::new();
         let mut total_tokens = 0u64;
         let mut agents_spawned = 0usize;
         // Map agent IDs to human-readable names for event display.
         let mut name_map = std::collections::HashMap::<AgentId, String>::new();
+        let mut team_members = Vec::<TeamConfigMember>::new();
 
         let mut lead_mailbox = self.broker.team_lead_mailbox()?;
 
@@ -76,6 +98,13 @@ impl TeamLead {
                 match self.spawn_named_teammate(spec).await {
                     Ok(handle) => {
                         name_map.insert(handle.agent_id, handle.name.clone());
+                        team_members.push(TeamConfigMember {
+                            name: handle.name.clone(),
+                            agent_id: handle.agent_id,
+                            agent_type: "teammate".to_string(),
+                            require_plan_approval: spec.require_plan_approval,
+                        });
+                        self.write_team_config(&team_members)?;
                         self.emit(AgentEvent::TeammateSpawned {
                             agent_id: handle.agent_id,
                             name: handle.name.clone(),
@@ -95,6 +124,13 @@ impl TeamLead {
                 match self.spawn_teammate(&name, String::new(), false).await {
                     Ok(handle) => {
                         name_map.insert(handle.agent_id, handle.name.clone());
+                        team_members.push(TeamConfigMember {
+                            name: handle.name.clone(),
+                            agent_id: handle.agent_id,
+                            agent_type: "teammate".to_string(),
+                            require_plan_approval: false,
+                        });
+                        self.write_team_config(&team_members)?;
                         self.emit(AgentEvent::TeammateSpawned {
                             agent_id: handle.agent_id,
                             name: handle.name.clone(),
@@ -217,6 +253,13 @@ impl TeamLead {
                 match self.spawn_teammate(&name, String::new(), false).await {
                     Ok(handle) => {
                         name_map.insert(handle.agent_id, handle.name.clone());
+                        team_members.push(TeamConfigMember {
+                            name: handle.name.clone(),
+                            agent_id: handle.agent_id,
+                            agent_type: "teammate".to_string(),
+                            require_plan_approval: false,
+                        });
+                        self.write_team_config(&team_members)?;
                         self.emit(AgentEvent::TeammateSpawned {
                             agent_id: handle.agent_id,
                             name: handle.name.clone(),
@@ -379,5 +422,23 @@ impl TeamLead {
         if let Some(ref tx) = self.event_tx {
             let _ = tx.send(event);
         }
+    }
+
+    fn write_team_config(&self, members: &[TeamConfigMember]) -> SdkResult<()> {
+        if let Some(parent) = self.team_config_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let config = TeamConfigFile {
+            team_name: self.team_name.clone(),
+            lead_id: self.id,
+            work_dir: self.work_dir.clone(),
+            source_root: self.source_root.clone(),
+            members: members.to_vec(),
+        };
+
+        let content = serde_json::to_string_pretty(&config)?;
+        std::fs::write(&self.team_config_path, content)?;
+        Ok(())
     }
 }

@@ -113,6 +113,25 @@ pub enum AgentEvent {
         feedback: String,
     },
 
+    // --- Subagent lifecycle ---
+    SubAgentSpawned {
+        agent_id: AgentId,
+        name: String,
+        description: String,
+    },
+    SubAgentCompleted {
+        agent_id: AgentId,
+        name: String,
+        tokens_used: u64,
+        iterations: usize,
+        tool_calls: usize,
+    },
+    SubAgentFailed {
+        agent_id: AgentId,
+        name: String,
+        error: String,
+    },
+
     /// Domain-specific custom event
     Custom {
         name: String,
@@ -139,6 +158,9 @@ impl AgentEvent {
             | Self::TeammateSpawned { agent_id, .. }
             | Self::AgentShutdown { agent_id, .. } => Some(*agent_id),
             Self::TeammateMessage { from, .. } => Some(*from),
+            Self::SubAgentSpawned { agent_id, .. }
+            | Self::SubAgentCompleted { agent_id, .. }
+            | Self::SubAgentFailed { agent_id, .. } => Some(*agent_id),
             Self::TeamSpawned { .. }
             | Self::HookRejected { .. }
             | Self::Custom { .. } => None,
@@ -164,6 +186,9 @@ impl AgentEvent {
             | Self::ShutdownRejected { name, .. }
             | Self::AgentShutdown { name, .. } => Some(name),
             Self::TeammateMessage { from_name, .. } => Some(from_name),
+            Self::SubAgentSpawned { name, .. }
+            | Self::SubAgentCompleted { name, .. }
+            | Self::SubAgentFailed { name, .. } => Some(name),
             Self::TeamSpawned { .. }
             | Self::HookRejected { .. }
             | Self::Custom { .. } => None,
