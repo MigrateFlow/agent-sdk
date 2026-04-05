@@ -1599,8 +1599,8 @@ async fn main() -> anyhow::Result<()> {
 
     // ── One-shot mode ──
     let one_shot_prompt = if let Some(ref path) = cli.prompt_file {
-        Some(std::fs::read_to_string(path).with_context(|| {
-            format!("Failed to read prompt file: {}", path.display())
+        Some(std::fs::read_to_string(path).map_err(|e| {
+            anyhow::anyhow!("Failed to read prompt file {}: {}", path.display(), e)
         })?)
     } else if !cli.prompt.is_empty() {
         Some(cli.prompt.join(" "))
