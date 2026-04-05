@@ -13,6 +13,7 @@ dependencies = [
  "console",
  "dirs",
  "dotenvy",
+ "encoding_rs",
  "fs2",
  "futures-util",
  "glob",

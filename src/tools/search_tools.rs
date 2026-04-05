@@ -71,7 +71,7 @@ impl Tool for SearchFilesTool {
                     break;
                 }
 
-                if let Ok(content) = tokio::fs::read_to_string(file_path).await {
+                if let Ok(content) = crate::tools::fs_tools::read_file_auto_encoding(file_path).await {
                     let mut file_matches = Vec::new();
                     for (line_num, line) in content.lines().enumerate() {
                         if line.contains(pattern) {

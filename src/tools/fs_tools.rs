@@ -8,6 +8,28 @@ use crate::traits::tool::{Tool, ToolDefinition};
 
 const DEFAULT_MAX_LINES: usize = 500;
 
+/// Read a file as a String, auto-detecting encoding.
+/// Tries UTF-8 first; falls back to Shift-JIS if the bytes are not valid UTF-8
+/// (common in Japanese enterprise Java codebases).
+pub async fn read_file_auto_encoding(path: &std::path::Path) -> std::io::Result<String> {
+    let bytes = tokio::fs::read(path).await?;
+
+    // Fast path: try UTF-8 first
+    match String::from_utf8(bytes.clone()) {
+        Ok(s) => return Ok(s),
+        Err(_) => {}
+    }
+
+    // Fallback: decode as Shift-JIS
+    let (cow, _encoding, had_errors) = encoding_rs::SHIFT_JIS.decode(&bytes);
+    if !had_errors {
+        return Ok(cow.into_owned());
+    }
+
+    // Last resort: lossy UTF-8
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 pub struct ReadFileTool {
     pub source_root: PathBuf,
     pub work_dir: PathBuf,
@@ -66,7 +88,7 @@ impl Tool for ReadFileTool {
             return Ok(json!({ "error": "Path escapes allowed directories" }));
         }
 
-        match tokio::fs::read_to_string(&canonical).await {
+        match read_file_auto_encoding(&canonical).await {
             Ok(content) => {
                 let all_lines: Vec<&str> = content.lines().collect();
                 let total_lines = all_lines.len();

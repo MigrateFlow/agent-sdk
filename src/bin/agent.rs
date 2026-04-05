@@ -233,7 +233,7 @@ fn format_tool_label(tool_name: &str, arguments: &str) -> String {
         }
         "run_command" => {
             let cmd = arg_str(&args, "command").unwrap_or("?");
-            let short = if cmd.len() > 80 { &cmd[..80] } else { cmd };
+            let short = if cmd.len() > 80 { &cmd[..floor_char_boundary(cmd, 80)] } else { cmd };
             format!("{}", style(format!("$ {}", short)).white())
         }
         "spawn_agent_team" => {
@@ -488,11 +488,24 @@ fn humanize(name: &str) -> String {
     if out.is_empty() { name.to_string() } else { out }
 }
 
+/// Find the largest byte index <= `desired` that lies on a UTF-8 char boundary.
+fn floor_char_boundary(s: &str, desired: usize) -> usize {
+    if desired >= s.len() {
+        return s.len();
+    }
+    let mut idx = desired;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
 fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}…", &s[..max_len])
+        let end = floor_char_boundary(s, max_len);
+        format!("{}…", &s[..end])
     }
 }
 
@@ -507,7 +520,7 @@ fn truncate_tool_result(s: &str) -> String {
         if let Some(content) = val.get_mut("content") {
             if let Some(text) = content.as_str() {
                 if text.len() > MAX_TOOL_RESULT_CHARS - 200 {
-                    let limit = MAX_TOOL_RESULT_CHARS - 200;
+                    let limit = floor_char_boundary(text, MAX_TOOL_RESULT_CHARS - 200);
                     let truncated = format!(
                         "{}…\n\n[truncated: {}/{} chars — use offset to read more]",
                         &text[..limit],
@@ -515,17 +528,19 @@ fn truncate_tool_result(s: &str) -> String {
                         text.len()
                     );
                     *content = serde_json::Value::String(truncated);
+                    let fallback_end = floor_char_boundary(s, MAX_TOOL_RESULT_CHARS);
                     return serde_json::to_string(&val)
-                        .unwrap_or_else(|_| s[..MAX_TOOL_RESULT_CHARS].to_string());
+                        .unwrap_or_else(|_| s[..fallback_end].to_string());
                 }
             }
         }
     }
 
+    let end = floor_char_boundary(s, MAX_TOOL_RESULT_CHARS);
     format!(
         "{}…[truncated: {}/{} chars]",
-        &s[..MAX_TOOL_RESULT_CHARS],
-        MAX_TOOL_RESULT_CHARS,
+        &s[..end],
+        end,
         s.len()
     )
 }
@@ -1309,7 +1324,7 @@ async fn main() -> anyhow::Result<()> {
 
         // Render agent name as a fixed-width tag with a left border
         let name_tag = |name: &str, color: console::Color| -> String {
-            let display = if name.len() > 16 { &name[..16] } else { name };
+            let display = if name.len() > 16 { &name[..floor_char_boundary(name, 16)] } else { name };
             format!(
                 "  {} {}",
                 style("│").fg(color),
