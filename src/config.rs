@@ -37,7 +37,7 @@ pub struct LlmConfig {
 }
 
 fn default_http_timeout_secs() -> u64 {
-    120
+    300
 }
 
 fn default_max_retries() -> u32 {

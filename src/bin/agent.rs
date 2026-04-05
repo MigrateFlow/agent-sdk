@@ -14,6 +14,7 @@ use agent_sdk::tools::search_tools::SearchFilesTool;
 use agent_sdk::tools::subagent_tools::SpawnSubAgentTool;
 use agent_sdk::tools::team_tools::SpawnAgentTeamTool;
 use agent_sdk::tools::web_tools::WebSearchTool;
+use agent_sdk::tools::mermaid_tools::VerifyMermaidTool;
 use agent_sdk::traits::tool::{Tool, ToolDefinition};
 use agent_sdk::types::chat::ChatMessage;
 use agent_sdk::{AgentEvent, StreamDelta};
@@ -698,6 +699,21 @@ fn build_tools(
 
     if allowed("update_task_list") {
         registry.register(Arc::new(UpdateTaskListTool { tasks }));
+    }
+
+    if allowed("verify_mermaid") {
+        // Script path is resolved relative to the SDK package, or via env var
+        let script_path = std::env::var("VERIFY_MERMAID_SCRIPT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| work_dir.join("node_modules/@optage/sdk/verify-mermaid-cli.mjs"));
+        // Work dir for node should be where node_modules are accessible
+        let node_work_dir = std::env::var("VERIFY_MERMAID_WORK_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| work_dir.to_path_buf());
+        registry.register(Arc::new(VerifyMermaidTool {
+            script_path,
+            work_dir: node_work_dir,
+        }));
     }
 
     registry
