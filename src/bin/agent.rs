@@ -73,6 +73,10 @@ struct Cli {
     #[arg(long)]
     session: Option<PathBuf>,
 
+    /// Read one-shot prompt from a file instead of positional args
+    #[arg(long)]
+    prompt_file: Option<PathBuf>,
+
     /// One-shot mode: run this prompt and exit
     prompt: Vec<String>,
 }
@@ -1594,8 +1598,17 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── One-shot mode ──
-    if !cli.prompt.is_empty() {
-        let prompt = cli.prompt.join(" ");
+    let one_shot_prompt = if let Some(ref path) = cli.prompt_file {
+        Some(std::fs::read_to_string(path).with_context(|| {
+            format!("Failed to read prompt file: {}", path.display())
+        })?)
+    } else if !cli.prompt.is_empty() {
+        Some(cli.prompt.join(" "))
+    } else {
+        None
+    };
+
+    if let Some(prompt) = one_shot_prompt {
         let mut messages = vec![ChatMessage::system(&system_prompt)];
         let tasks = Arc::new(Mutex::new(Vec::<CliTask>::new()));
         let tool_filter = cli.tools.as_deref();
