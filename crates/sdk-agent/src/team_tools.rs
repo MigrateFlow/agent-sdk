@@ -27,6 +27,7 @@ pub struct SpawnAgentTeamTool {
     pub work_dir: PathBuf,
     pub source_root: PathBuf,
     pub llm_client: Arc<dyn LlmClient>,
+    pub llm_config: sdk_core::config::LlmConfig,
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
     /// When set, background team results are sent back through this channel
     /// so the parent agent loop can inject them into its conversation.
@@ -61,6 +62,8 @@ struct TeammateRequest {
     require_plan_approval: bool,
     #[serde(default)]
     isolation: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,7 +99,8 @@ impl Tool for SpawnAgentTeamTool {
                                 "name": { "type": "string", "description": "Short name for the teammate (e.g. 'backend-dev', 'reviewer')" },
                                 "role": { "type": "string", "description": "Description of what this teammate should do" },
                                 "require_plan_approval": { "type": "boolean", "description": "If true, teammate must submit a plan before implementing" },
-                                "isolation": { "type": "string", "enum": ["none", "worktree"], "description": "Isolation mode: 'worktree' gives the teammate its own git worktree to prevent merge conflicts" }
+                                "isolation": { "type": "string", "enum": ["none", "worktree"], "description": "Isolation mode: 'worktree' gives the teammate its own git worktree to prevent merge conflicts" },
+                                "model": { "type": "string", "description": "Optional LLM model override for this teammate (e.g. 'claude-sonnet-4-5-20250514'). Defaults to the parent's model." }
                             },
                             "required": ["name", "role"]
                         }
@@ -208,6 +212,7 @@ impl Tool for SpawnAgentTeamTool {
                     prompt: t.role.clone(),
                     require_plan_approval: t.require_plan_approval,
                     isolation,
+                    model: t.model.clone(),
                 }
             })
             .collect();
@@ -236,6 +241,7 @@ impl Tool for SpawnAgentTeamTool {
             task_store,
             broker,
             llm_client: self.llm_client.clone(),
+            llm_config: self.llm_config.clone(),
             prompt_builder: Arc::new(DefaultPromptBuilder),
             config: AgentConfig {
                 max_parallel_agents: teammate_count,

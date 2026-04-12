@@ -32,6 +32,9 @@ pub struct TeammateSpec {
     pub prompt: String,
     pub require_plan_approval: bool,
     pub isolation: Option<crate::worktree::IsolationMode>,
+    /// Optional model override. When set, a dedicated `LlmClient` is created
+    /// for this teammate. When `None`, the teammate shares the lead's client.
+    pub model: Option<String>,
 }
 
 pub struct TeamLead {
@@ -41,6 +44,7 @@ pub struct TeamLead {
     pub task_store: Arc<TaskStore>,
     pub broker: Arc<MessageBroker>,
     pub llm_client: Arc<dyn LlmClient>,
+    pub llm_config: sdk_core::config::LlmConfig,
     pub prompt_builder: Arc<dyn PromptBuilder>,
     pub config: AgentConfig,
     pub source_root: std::path::PathBuf,
@@ -131,7 +135,7 @@ impl TeamLead {
             let initial_count = self.config.max_parallel_agents;
             for i in 0..initial_count {
                 let name = format!("teammate-{}", i + 1);
-                match self.spawn_teammate(&name, String::new(), false, None, &mut worktree_handles).await {
+                match self.spawn_teammate(&name, String::new(), false, None, None, &mut worktree_handles).await {
                     Ok(handle) => {
                         name_map.insert(handle.agent_id, handle.name.clone());
                         team_members.push(TeamConfigMember {
@@ -267,7 +271,7 @@ impl TeamLead {
                 };
                 if active < max_agents && summary.pending > 0 {
                     let name = format!("teammate-{}", agents_spawned + 1);
-                    match self.spawn_teammate(&name, String::new(), false, None, &mut worktree_handles).await {
+                    match self.spawn_teammate(&name, String::new(), false, None, None, &mut worktree_handles).await {
                         Ok(handle) => {
                             name_map.insert(handle.agent_id, handle.name.clone());
                             team_members.push(TeamConfigMember {
@@ -402,6 +406,7 @@ impl TeamLead {
         role_prompt: String,
         require_plan_approval: bool,
         isolation: Option<crate::worktree::IsolationMode>,
+        model: Option<String>,
         worktree_handles: &mut std::collections::HashMap<AgentId, crate::worktree::WorktreeHandle>,
     ) -> SdkResult<AgentHandle> {
         let agent_id = Uuid::new_v4();
@@ -424,13 +429,21 @@ impl TeamLead {
             self.work_dir.clone()
         };
 
+        let teammate_llm_client = if let Some(ref model_name) = model {
+            let mut cfg = self.llm_config.clone();
+            cfg.model = model_name.clone();
+            sdk_llm::create_client(&cfg)?
+        } else {
+            self.llm_client.clone()
+        };
+
         let ctx = AgentContext {
             agent_id,
             name: name.to_string(),
             role_prompt: effective_role_prompt,
             task_store: self.task_store.clone(),
             broker: self.broker.clone(),
-            llm_client: self.llm_client.clone(),
+            llm_client: teammate_llm_client,
             prompt_builder: self.prompt_builder.clone(),
             work_dir: teammate_work_dir,
             source_root: self.source_root.clone(),
@@ -467,6 +480,7 @@ impl TeamLead {
             spec.prompt.clone(),
             spec.require_plan_approval,
             spec.isolation.clone(),
+            spec.model.clone(),
             worktree_handles,
         )
             .await
