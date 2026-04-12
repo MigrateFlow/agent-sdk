@@ -10,3 +10,4 @@ pub mod context_tools;
 pub mod memory_tools;
 pub mod mcp_tools;
 pub mod lsp_tools;
+pub mod task_tools;

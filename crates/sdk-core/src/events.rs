@@ -15,6 +15,12 @@ pub enum AgentEvent {
     },
 
     // --- Task lifecycle ---
+    TaskCreated {
+        agent_id: AgentId,
+        name: String,
+        task_id: TaskId,
+        title: String,
+    },
     TaskStarted {
         agent_id: AgentId,
         name: String,
@@ -160,7 +166,8 @@ pub enum AgentEvent {
 impl AgentEvent {
     pub fn agent_id(&self) -> Option<AgentId> {
         match self {
-            Self::TaskStarted { agent_id, .. }
+            Self::TaskCreated { agent_id, .. }
+            | Self::TaskStarted { agent_id, .. }
             | Self::Thinking { agent_id, .. }
             | Self::ToolCall { agent_id, .. }
             | Self::ToolResult { agent_id, .. }
@@ -191,6 +198,7 @@ impl AgentEvent {
     pub fn agent_name(&self) -> Option<&str> {
         match self {
             Self::TeammateSpawned { name, .. }
+            | Self::TaskCreated { name, .. }
             | Self::TaskStarted { name, .. }
             | Self::Thinking { name, .. }
             | Self::ToolCall { name, .. }
