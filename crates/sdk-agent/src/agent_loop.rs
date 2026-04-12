@@ -434,6 +434,16 @@ impl AgentLoop {
 
                         self.tool_calls_count += 1;
                     }
+
+                    // Emit subagent progress after processing tool results
+                    self.emit(AgentEvent::SubAgentProgress {
+                        agent_id: self.agent_id,
+                        name: self.agent_name.clone(),
+                        iteration: iteration + 1,
+                        max_turns: self.max_iterations,
+                        current_tool: tool_calls.last().map(|tc| tc.function.name.clone()),
+                        tokens_so_far: self.total_tokens,
+                    });
                 }
                 ChatMessage::Assistant { content, .. } => {
                     let final_content = content.clone().unwrap_or_default();

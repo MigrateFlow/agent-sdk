@@ -127,6 +127,14 @@ pub enum AgentEvent {
         name: String,
         description: String,
     },
+    SubAgentProgress {
+        agent_id: AgentId,
+        name: String,
+        iteration: usize,
+        max_turns: usize,
+        current_tool: Option<String>,
+        tokens_so_far: u64,
+    },
     SubAgentCompleted {
         agent_id: AgentId,
         name: String,
@@ -169,6 +177,7 @@ impl AgentEvent {
             | Self::AgentShutdown { agent_id, .. } => Some(*agent_id),
             Self::TeammateMessage { from, .. } => Some(*from),
             Self::SubAgentSpawned { agent_id, .. }
+            | Self::SubAgentProgress { agent_id, .. }
             | Self::SubAgentCompleted { agent_id, .. }
             | Self::SubAgentFailed { agent_id, .. } => Some(*agent_id),
             Self::TeamSpawned { .. }
@@ -198,6 +207,7 @@ impl AgentEvent {
             | Self::AgentShutdown { name, .. } => Some(name),
             Self::TeammateMessage { from_name, .. } => Some(from_name),
             Self::SubAgentSpawned { name, .. }
+            | Self::SubAgentProgress { name, .. }
             | Self::SubAgentCompleted { name, .. }
             | Self::SubAgentFailed { name, .. } => Some(name),
             Self::TeamSpawned { .. }
