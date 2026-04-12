@@ -2,10 +2,16 @@ pub mod cache_commands;
 pub mod commands;
 pub mod compaction;
 pub mod display;
+pub mod event_handler;
+pub mod format;
+pub mod mcp;
+pub mod ndjson;
 pub mod plan_commands;
 pub mod session;
 pub mod session_commands;
 pub mod session_manager;
+pub mod tools;
+pub mod turn;
 pub mod ultra_plan_commands;
 
 pub use commands::{CommandCategory, CommandContext, CommandOutcome, SlashCommand, SlashCommandRegistry};

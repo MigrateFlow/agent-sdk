@@ -1723,17 +1723,27 @@ dependencies = [
 name = "sdk-cli"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "chrono",
+ "clap",
  "console",
  "dirs",
+ "dotenvy",
  "indicatif",
  "libc",
+ "sdk-agent",
  "sdk-core",
+ "sdk-llm",
+ "sdk-protocols",
+ "sdk-task",
+ "sdk-tools",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

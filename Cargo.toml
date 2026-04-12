@@ -88,10 +88,6 @@ include = [
 name = "agent_sdk"
 path = "src/lib.rs"
 
-[[bin]]
-name = "agent"
-path = "src/bin/agent.rs"
-
 [dependencies]
 sdk-core = { workspace = true }
 sdk-llm = { workspace = true }

@@ -4,10 +4,19 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.78"
 license = "MIT"
-description = "CLI helpers for agent-orchestrator-sdk"
+description = "CLI helpers and binary for agent-orchestrator-sdk"
+
+[[bin]]
+name = "agent"
+path = "src/main.rs"
 
 [dependencies]
 sdk-core = { workspace = true }
+sdk-llm = { workspace = true }
+sdk-agent = { workspace = true }
+sdk-tools = { workspace = true }
+sdk-protocols = { workspace = true }
+sdk-task = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
@@ -16,7 +25,12 @@ console = { workspace = true }
 indicatif = { workspace = true }
 dirs = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+dotenvy = "0.15"
+anyhow = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
