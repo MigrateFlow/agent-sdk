@@ -422,6 +422,7 @@ impl OpenAiClient {
 
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
+        let mut done = false;
 
         use futures_util::StreamExt;
         while let Some(chunk_result) = stream.next().await {
@@ -448,6 +449,7 @@ impl OpenAiClient {
                 };
 
                 if data == "[DONE]" {
+                    done = true;
                     break;
                 }
 
@@ -507,6 +509,7 @@ impl OpenAiClient {
                     }
                 }
             }
+            if done { break; }
         }
 
         // Build the final ChatMessage
