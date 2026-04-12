@@ -806,14 +806,18 @@ async fn run_turn(
             });
         }
 
-        let spinner = if json_mode { None } else { Some(create_spinner("Thinking…")) };
+        let mut spinner = if json_mode { None } else { Some(create_spinner("Thinking…")) };
 
         let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel::<StreamDelta>();
-        let llm_fut = llm_client.chat_stream(messages, &tool_defs, delta_tx);
+
+        // Signal so the emit task can tell us to clear the spinner
+        // before it starts writing streamed text to stderr.
+        let (streaming_started_tx, streaming_started_rx) = tokio::sync::oneshot::channel::<()>();
 
         let is_json = json_mode;
         let emit_handle = tokio::spawn(async move {
             let mut streaming_started = false;
+            let mut started_tx = Some(streaming_started_tx);
             while let Some(delta) = delta_rx.recv().await {
                 match delta {
                     StreamDelta::Text(text) => {
@@ -822,8 +826,12 @@ async fn run_turn(
                         } else {
                             if !streaming_started {
                                 streaming_started = true;
-                                // Start the response text on a new line
-                                eprint!("\r\x1b[K");
+                                // Signal the main task to clear the spinner
+                                if let Some(tx) = started_tx.take() {
+                                    let _ = tx.send(());
+                                }
+                                // Small yield to let the main task clear the spinner
+                                tokio::task::yield_now().await;
                             }
                             eprint!("{}", text);
                             let _ = io::stderr().flush();
@@ -837,15 +845,30 @@ async fn run_turn(
             streaming_started
         });
 
-        let result = llm_fut.await;
-        let streamed = emit_handle.await.unwrap_or(false);
+        // Clone messages so chat_stream doesn't borrow `messages` across
+        // the rest of the loop iteration where we need to push into it.
+        let messages_snapshot = messages.clone();
+        let llm_fut = llm_client.chat_stream(&messages_snapshot, &tool_defs, delta_tx);
 
-        if let Some(s) = &spinner {
-            if !streamed {
-                s.finish_and_clear();
-            } else {
-                s.finish_and_clear();
+        // Wait for LLM completion, but clear the spinner as soon as
+        // the first text delta arrives so it doesn't overwrite streamed text.
+        tokio::pin!(llm_fut);
+        let result = tokio::select! {
+            biased;
+            _ = streaming_started_rx => {
+                // First text delta arrived — clear spinner immediately
+                if let Some(s) = spinner.take() {
+                    s.finish_and_clear();
+                }
+                // Continue waiting for LLM to finish
+                llm_fut.await
             }
+            res = &mut llm_fut => res,
+        };
+
+        let streamed = emit_handle.await.unwrap_or(false);
+        if let Some(s) = spinner {
+            s.finish_and_clear();
         }
 
         // Check interrupt after call returns
