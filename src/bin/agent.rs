@@ -673,7 +673,6 @@ fn build_verify_mermaid_tool(work_dir: &Path) -> Option<VerifyMermaidTool> {
     let script_path = std::env::var("VERIFY_MERMAID_SCRIPT")
         .ok()
         .map(PathBuf::from)?;
-
     let node_work_dir = std::env::var("VERIFY_MERMAID_WORK_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| work_dir.to_path_buf());
