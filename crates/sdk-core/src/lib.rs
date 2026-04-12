@@ -1,0 +1,30 @@
+pub mod error;
+pub mod config;
+pub mod types;
+pub mod traits;
+pub mod prompts;
+pub mod storage;
+pub mod registry;
+pub mod events;
+pub mod memory;
+pub mod cost;
+pub mod hooks;
+pub mod background;
+
+// Convenience re-exports
+pub use error::{AgentId, TaskId, SdkError, SdkResult};
+pub use config::{LlmConfig, LlmProvider, AgentConfig, AGENT_DIR};
+pub use traits::llm_client::{LlmClient, StreamDelta};
+pub use traits::tool::{Tool, ToolDefinition};
+pub use traits::prompt_builder::{PromptBuilder, DefaultPromptBuilder};
+pub use types::chat::ChatMessage;
+pub use types::task::{Task, TaskResult, TaskStatus};
+pub use types::usage::TokenUsage;
+pub use types::memory::{MemoryEntry, MemoryType};
+pub use events::AgentEvent;
+pub use memory::MemoryStore;
+pub use hooks::{Hook, HookEvent, HookResult, HookRegistry};
+pub use cost::{CostRecord, CostTracker};
+pub use registry::ToolRegistry;
+pub use storage::AgentPaths;
+pub use background::{BackgroundResult, BackgroundResultKind};

@@ -1,0 +1,22 @@
+[package]
+name = "sdk-tools"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.78"
+license = "MIT"
+description = "Built-in tool implementations for agent-orchestrator-sdk"
+
+[dependencies]
+sdk-core = { workspace = true }
+sdk-task = { workspace = true }
+sdk-protocols = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+glob = { workspace = true }
+scraper = { workspace = true }
+encoding_rs = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+uuid = { workspace = true }

@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-Important: in the current implementation, `run("Document the SDK")` does not inject that string into the team prompt flow. The work is driven by `add_teammate(...)` and `add_task(...)`.
+Note: `run("Document the SDK")` adds the provided goal as a root task when no tasks are pre-seeded and also prefixes the goal into each teammate's system prompt (as `Team goal: <goal>`) so teammates share the high-level objective in their context. If you pre-seed tasks with `add_task(...)`, the goal is only included in teammates' system prompts and does not overwrite explicit tasks.
 
 ## LLM Configuration
 

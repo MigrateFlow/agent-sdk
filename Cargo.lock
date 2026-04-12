@@ -22,6 +22,13 @@ dependencies = [
  "petgraph",
  "reqwest",
  "scraper",
+ "sdk-agent",
+ "sdk-cli",
+ "sdk-core",
+ "sdk-llm",
+ "sdk-protocols",
+ "sdk-task",
+ "sdk-tools",
  "serde",
  "serde_json",
  "tempfile",
@@ -1691,6 +1698,118 @@ dependencies = [
  "precomputed-hash",
  "selectors",
  "tendril",
+]
+
+[[package]]
+name = "sdk-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures-util",
+ "sdk-core",
+ "sdk-llm",
+ "sdk-protocols",
+ "sdk-task",
+ "sdk-tools",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "sdk-cli"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "console",
+ "dirs",
+ "indicatif",
+ "sdk-core",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "sdk-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "dirs",
+ "fs2",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "sdk-llm"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "reqwest",
+ "sdk-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "sdk-protocols"
+version = "0.1.0"
+dependencies = [
+ "lsp-types",
+ "sdk-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "sdk-task"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "fs2",
+ "petgraph",
+ "sdk-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "sdk-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "encoding_rs",
+ "glob",
+ "reqwest",
+ "scraper",
+ "sdk-core",
+ "sdk-protocols",
+ "sdk-task",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

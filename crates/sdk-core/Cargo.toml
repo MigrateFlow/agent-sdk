@@ -1,0 +1,21 @@
+[package]
+name = "sdk-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.78"
+license = "MIT"
+description = "Core types, traits, and foundational modules for agent-orchestrator-sdk"
+
+[dependencies]
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+fs2 = { workspace = true }
+tracing = { workspace = true }
+dirs = { workspace = true }

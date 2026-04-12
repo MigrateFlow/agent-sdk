@@ -25,7 +25,7 @@ Use these documents in this order:
 
 ## Important Current Behavior
 
-- `AgentTeam::run(...)` executes the tasks you add with `add_task(...)`. The `goal` string is accepted but is not currently used by the orchestration logic.
+- `AgentTeam::run(...)` executes the tasks you add with `add_task(...)`. The `goal` string is threaded into each teammate's system prompt (prefixed as `Team goal: <goal>`) and is included in their context; if no tasks are pre-seeded, a single root task is created from the goal so the team has work to claim.
 - `AgentTeam::run_single(...)` is the simplest programmatic entrypoint for one-agent work.
 - The CLI is separate from `AgentTeam`. It uses a conversational loop and can dynamically call `spawn_agent_team`.
 - Team infrastructure is written under `~/.agent/teams/<team-name>/` and `~/.agent/tasks/<team-name>/`, while `.agent/` in the repo is reserved for shared config files.

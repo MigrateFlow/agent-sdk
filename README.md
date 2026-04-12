@@ -69,6 +69,8 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+Note: When you call `.run(goal)`, the goal string is prefixed into each teammate's system prompt as `Team goal: <goal>` so teammates share the high-level objective. If you haven't pre-seeded tasks with `add_task(...)`, `run(goal)` will create a single root task from the goal so the team has immediate work to claim.
+
 For simple tasks that don't need a team, use `run_single`:
 
 ```rust

@@ -47,7 +47,7 @@ Primary public entrypoints:
 
 ## Important Repo-Specific Behavior
 
-- `AgentTeam::run(goal)` currently accepts a `goal` string, but the current orchestration logic does not use it. The task list and teammate config drive execution.
+- `AgentTeam::run(goal)` accepts a `goal` string which is threaded into each teammate's system prompt as `Team goal: <goal>` so teammates share a common objective. Additionally, if no tasks are pre-seeded via `add_task(...)` and `goal` is non-empty, a single root task is auto-seeded from the goal so the team has immediate work to claim.
 - `AgentTeam::run_single(...)` is the simplest programmatic path for one-agent work.
 - The CLI is separate from `AgentTeam`; it runs its own conversational loop and can call `spawn_agent_team`.
 - `run_command` is effectively unrestricted by default. In the CLI, `--allow-all-commands` is kept for compatibility and is effectively a no-op.

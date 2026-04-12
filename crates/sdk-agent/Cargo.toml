@@ -1,0 +1,22 @@
+[package]
+name = "sdk-agent"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.78"
+license = "MIT"
+description = "Agent orchestration and loop for agent-orchestrator-sdk"
+
+[dependencies]
+sdk-core = { workspace = true }
+sdk-llm = { workspace = true }
+sdk-task = { workspace = true }
+sdk-tools = { workspace = true }
+sdk-protocols = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+futures-util = { workspace = true }
