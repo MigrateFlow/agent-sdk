@@ -22,6 +22,8 @@ impl GlobTool {
 
 #[async_trait]
 impl Tool for GlobTool {
+    fn is_read_only(&self) -> bool { true }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "glob".to_string(),

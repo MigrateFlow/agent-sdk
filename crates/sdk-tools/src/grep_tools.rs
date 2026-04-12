@@ -123,6 +123,8 @@ impl PatternMatcher {
 
 #[async_trait]
 impl Tool for GrepTool {
+    fn is_read_only(&self) -> bool { true }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "grep".to_string(),

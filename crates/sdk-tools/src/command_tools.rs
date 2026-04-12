@@ -29,6 +29,8 @@ impl RunCommandTool {
 
 #[async_trait]
 impl Tool for RunCommandTool {
+    fn is_destructive(&self) -> bool { true }
+
     fn definition(&self) -> ToolDefinition {
         let desc = if self.allowed_commands.is_empty() {
             "Execute any shell command in the working directory.".to_string()
