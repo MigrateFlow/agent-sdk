@@ -70,6 +70,7 @@ impl TestHarness {
             total_tokens: &mut self.total_tokens,
             tool_calls: &mut self.tool_calls,
             turns: &mut self.turns,
+            cache_state: None,
         }
     }
 }

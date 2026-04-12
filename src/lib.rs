@@ -12,6 +12,7 @@ pub mod storage;
 pub mod mcp;
 pub mod cli;
 pub mod lsp;
+pub mod cache;
 
 // Convenience re-exports
 pub use error::{AgentId, TaskId, SdkError, SdkResult};
@@ -37,3 +38,8 @@ pub use storage::AgentPaths;
 pub use mcp::{McpClient, McpConfig, McpServerSpec};
 pub use cli::commands::{CommandContext, CommandOutcome, SlashCommand, SlashCommandRegistry};
 pub use lsp::{ChildLspClient, LspClient, LspConfig, LspManager, ServerSpec};
+pub use cache::{
+    CacheBreakDetector, CacheBreakReason, CacheStats, CachedFile, FileStateCache,
+    StatsCache, StatsEntry, StatsSummary, ToolResultStore, hash_content,
+};
+pub use cli::cache_commands::CacheState;

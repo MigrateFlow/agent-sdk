@@ -51,6 +51,8 @@ pub struct CommandContext<'a> {
     pub total_tokens: &'a mut u64,
     pub tool_calls: &'a mut usize,
     pub turns: &'a mut usize,
+    /// Optional cache state for `/cache` and `/cache-clear` commands.
+    pub cache_state: Option<Arc<crate::cli::cache_commands::CacheState>>,
 }
 
 impl<'a> CommandContext<'a> {
@@ -124,6 +126,8 @@ impl SlashCommandRegistry {
         r.register(Arc::new(TasksCommand));
         r.register(Arc::new(CostCommand));
         r.register(Arc::new(StatusCommand));
+        r.register(Arc::new(crate::cli::cache_commands::CacheCommand));
+        r.register(Arc::new(crate::cli::cache_commands::CacheClearCommand));
         r.register(Arc::new(QuitCommand));
         r
     }

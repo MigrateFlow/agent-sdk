@@ -1465,6 +1465,15 @@ async fn main() -> anyhow::Result<()> {
     let paths = agent_sdk::storage::AgentPaths::for_work_dir(&work_dir)?;
     let slash_registry = SlashCommandRegistry::builtin();
 
+    // ── Cache state ──
+    let cache_state = Arc::new(agent_sdk::cli::cache_commands::CacheState {
+        file_cache: Arc::new(agent_sdk::cache::FileStateCache::new()),
+        stats_path: session_path
+            .parent()
+            .map(|p| p.join("stats.jsonl"))
+            .unwrap_or_else(|| PathBuf::from("stats.jsonl")),
+    });
+
     let tasks = Arc::new(Mutex::new(Vec::<CliTask>::new()));
 
     let mut messages = match load_session(&session_path, &system_prompt) {
@@ -1524,6 +1533,7 @@ async fn main() -> anyhow::Result<()> {
                 total_tokens: &mut session_tokens,
                 tool_calls: &mut session_tool_calls,
                 turns: &mut session_turns,
+                cache_state: Some(cache_state.clone()),
             };
 
             match slash_registry.dispatch(&input, &mut ctx).await {

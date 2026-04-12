@@ -4,6 +4,7 @@
 //! (see [`commands`]) and reuse the CLI session/display helpers that the
 //! binary itself relies on.
 
+pub mod cache_commands;
 pub mod commands;
 pub mod compaction;
 pub mod display;
