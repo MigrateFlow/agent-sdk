@@ -26,6 +26,8 @@ pub struct CliSessionData {
     pub messages: Vec<ChatMessage>,
     #[serde(default)]
     pub tasks: Vec<CliTask>,
+    #[serde(default)]
+    pub ultra_plan: Option<crate::types::ultra_plan::UltraPlanState>,
 }
 
 /// Return the default session-file path for a given working directory.
@@ -49,6 +51,7 @@ pub fn load_session(path: &Path, system_prompt: &str) -> Option<CliSessionData> 
                 .map(|messages| CliSessionData {
                     messages,
                     tasks: Vec::new(),
+                    ultra_plan: None,
                 })
         })?;
 
@@ -64,12 +67,23 @@ pub fn save_session(
     messages: &[ChatMessage],
     tasks: &[CliTask],
 ) -> std::io::Result<()> {
+    save_session_full(path, messages, tasks, None)
+}
+
+/// Persist a CLI session to disk with optional UltraPlan state.
+pub fn save_session_full(
+    path: &Path,
+    messages: &[ChatMessage],
+    tasks: &[CliTask],
+    ultra_plan: Option<&crate::types::ultra_plan::UltraPlanState>,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let session = CliSessionData {
         messages: messages.to_vec(),
         tasks: tasks.to_vec(),
+        ultra_plan: ultra_plan.cloned(),
     };
     let json = serde_json::to_string(&session)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;

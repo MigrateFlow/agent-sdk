@@ -8,6 +8,7 @@ pub mod commands;
 pub mod compaction;
 pub mod display;
 pub mod session;
+pub mod ultra_plan_commands;
 
 pub use commands::{
     ClearCommand, CommandContext, CommandOutcome, CompactCommand, CostCommand, HelpCommand,

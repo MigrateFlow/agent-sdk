@@ -32,6 +32,7 @@ pub use traits::tool::{Tool, ToolDefinition};
 pub use types::chat::ChatMessage;
 pub use types::task::{Task, TaskResult, TaskStatus};
 pub use types::usage::TokenUsage;
+pub use types::ultra_plan::{UltraPlanPhase, UltraPlanState};
 pub use llm::create_client;
 pub use storage::AgentPaths;
 pub use mcp::{McpClient, McpConfig, McpServerSpec};

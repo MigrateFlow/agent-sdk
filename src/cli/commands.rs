@@ -18,7 +18,7 @@ use console::style;
 
 use crate::cli::compaction::compact_conversation;
 use crate::cli::display::{display_path, format_token_count, print_task_list, truncate};
-use crate::cli::session::{save_session, CliTask};
+use crate::cli::session::CliTask;
 use crate::error::{SdkError, SdkResult};
 use crate::storage::AgentPaths;
 use crate::types::chat::ChatMessage;
@@ -51,6 +51,7 @@ pub struct CommandContext<'a> {
     pub total_tokens: &'a mut u64,
     pub tool_calls: &'a mut usize,
     pub turns: &'a mut usize,
+    pub ultra_plan: &'a mut Option<crate::types::ultra_plan::UltraPlanState>,
 }
 
 impl<'a> CommandContext<'a> {
@@ -61,7 +62,12 @@ impl<'a> CommandContext<'a> {
             .lock()
             .map(|g| g.clone())
             .unwrap_or_default();
-        save_session(&self.session_path, self.messages, &tasks)?;
+        crate::cli::session::save_session_full(
+            &self.session_path,
+            self.messages,
+            &tasks,
+            self.ultra_plan.as_ref(),
+        )?;
         Ok(())
     }
 }
@@ -125,6 +131,10 @@ impl SlashCommandRegistry {
         r.register(Arc::new(CostCommand));
         r.register(Arc::new(StatusCommand));
         r.register(Arc::new(QuitCommand));
+        r.register(Arc::new(crate::cli::ultra_plan_commands::UltraPlanCommand));
+        r.register(Arc::new(crate::cli::ultra_plan_commands::NextPhaseCommand));
+        r.register(Arc::new(crate::cli::ultra_plan_commands::PhaseCommand));
+        r.register(Arc::new(crate::cli::ultra_plan_commands::ExitUltraPlanCommand));
         r
     }
 

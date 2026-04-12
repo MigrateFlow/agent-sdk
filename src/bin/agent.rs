@@ -18,10 +18,11 @@ use agent_sdk::traits::tool::{Tool, ToolDefinition};
 use agent_sdk::types::chat::ChatMessage;
 use agent_sdk::cli::{
     display::{display_path, floor_char_boundary, format_token_count, print_task_list, truncate},
-    session::{default_session_path, load_session, save_session, CliTask},
+    session::{default_session_path, load_session, CliTask},
     CommandContext, CommandOutcome, SlashCommandRegistry,
 };
-use agent_sdk::{AgentEvent, StreamDelta};
+use agent_sdk::{AgentEvent, StreamDelta, UltraPlanState};
+use agent_sdk::types::ultra_plan::{allowed_tools_for_phase, phase_system_suffix};
 use clap::Parser;
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -1466,10 +1467,12 @@ async fn main() -> anyhow::Result<()> {
     let slash_registry = SlashCommandRegistry::builtin();
 
     let tasks = Arc::new(Mutex::new(Vec::<CliTask>::new()));
+    let mut ultra_plan_state: Option<UltraPlanState> = None;
 
     let mut messages = match load_session(&session_path, &system_prompt) {
         Some(session) => {
             let n = session.messages.len();
+            ultra_plan_state = session.ultra_plan;
             {
                 let mut current = tasks.lock().expect("task list mutex poisoned");
                 *current = session.tasks;
@@ -1479,6 +1482,13 @@ async fn main() -> anyhow::Result<()> {
                 style("↻").green(),
                 style(n).dim(),
             );
+            if let Some(ref state) = ultra_plan_state {
+                eprintln!(
+                    "   {} {}",
+                    style("mode:").dim(),
+                    style(format!("ultraplan ({})", state.phase)).yellow(),
+                );
+            }
             let current = tasks.lock().expect("task list mutex poisoned").clone();
             if !current.is_empty() {
                 eprintln!();
@@ -1503,7 +1513,11 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| "agent".to_string());
 
     loop {
-        eprint!("{} {} ", style(&project_name).dim(), style(">").cyan().bold());
+        let phase_indicator = match &ultra_plan_state {
+            Some(state) => format!(" {}", style(format!("[{}]", state.phase)).yellow()),
+            None => String::new(),
+        };
+        eprint!("{}{} {} ", style(&project_name).dim(), phase_indicator, style(">").cyan().bold());
         io::stderr().flush()?;
 
         let input = read_input()?;
@@ -1524,6 +1538,7 @@ async fn main() -> anyhow::Result<()> {
                 total_tokens: &mut session_tokens,
                 tool_calls: &mut session_tool_calls,
                 turns: &mut session_turns,
+                ultra_plan: &mut ultra_plan_state,
             };
 
             match slash_registry.dispatch(&input, &mut ctx).await {
@@ -1559,6 +1574,29 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        // ── UltraPlan: apply phase-specific system prompt suffix ──
+        if let Some(ChatMessage::System { content }) = messages.first_mut() {
+            // Strip any existing ultraplan suffix first
+            if let Some(idx) = content.find("\n# ULTRAPLAN:") {
+                content.truncate(idx);
+            }
+            // Append the current phase suffix if active
+            if let Some(ref state) = ultra_plan_state {
+                content.push_str(phase_system_suffix(&state.phase));
+            }
+        }
+
+        // ── UltraPlan: compute phase-specific tool filter ──
+        let ultraplan_filter: Option<Vec<String>> = ultra_plan_state.as_ref().and_then(|state| {
+            let tools = allowed_tools_for_phase(&state.phase);
+            if tools.is_empty() {
+                None // Implement phase = all tools
+            } else {
+                Some(tools.iter().map(|s| s.to_string()).collect())
+            }
+        });
+        let effective_filter = ultraplan_filter.as_deref();
+
         let stats = run_turn(
             &mut messages,
             &input,
@@ -1571,7 +1609,7 @@ async fn main() -> anyhow::Result<()> {
             interrupt.clone(),
             subagent_registry.clone(),
             false,
-            None,
+            effective_filter,
             &mcp_tools,
         )
         .await?;
@@ -1582,10 +1620,11 @@ async fn main() -> anyhow::Result<()> {
 
         print_usage(&stats);
 
-        if let Err(e) = save_session(
+        if let Err(e) = agent_sdk::cli::session::save_session_full(
             &session_path,
             &messages,
             &tasks.lock().expect("task list mutex poisoned"),
+            ultra_plan_state.as_ref(),
         ) {
             eprintln!("  {} session save: {}", style("⚠").yellow(), e);
         }
