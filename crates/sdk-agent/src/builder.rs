@@ -29,6 +29,7 @@ use sdk_core::registry::ToolRegistry;
 use sdk_tools::search_tools::SearchFilesTool;
 use crate::subagent_tools::SpawnSubAgentTool;
 use crate::team_tools::SpawnAgentTeamTool;
+use sdk_tools::task_tools::CreateTaskTool;
 use sdk_tools::todo_tools::TodoWriteTool;
 use sdk_tools::web_tools::WebSearchTool;
 use sdk_protocols::lsp::{work_dir_to_root_uri, LspConfig, LspManager};
@@ -192,6 +193,11 @@ impl DefaultToolsetBuilder {
             task_store: task_store.clone(),
         });
         self.register(ListCompletedTasksTool { task_store });
+        self
+    }
+
+    pub fn add_task_creation_tools(mut self, task_store: Arc<TaskStore>, agent_id: AgentId) -> Self {
+        self.register(CreateTaskTool { task_store, agent_id });
         self
     }
 

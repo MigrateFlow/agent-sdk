@@ -37,6 +37,7 @@ impl Teammate {
             )
             .add_memory_tools(self.ctx.memory_store.clone(), self.ctx.agent_id)
             .add_task_context_tools(self.ctx.task_store.clone())
+            .add_task_creation_tools(self.ctx.task_store.clone(), self.ctx.agent_id)
             .build()
     }
 

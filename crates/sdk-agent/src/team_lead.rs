@@ -248,32 +248,39 @@ impl TeamLead {
                 }
             }
 
-            // Spawn replacement teammates if needed (only for generic mode)
-            if self.teammate_specs.is_empty()
-                && registry.active_count() < self.config.max_parallel_agents
-                && (summary.pending > 0)
+            // Spawn replacement teammates if needed (only for generic mode),
+            // and also spawn additional teammates for dynamically created tasks.
             {
-                let name = format!("teammate-{}", agents_spawned + 1);
-                match self.spawn_teammate(&name, String::new(), false).await {
-                    Ok(handle) => {
-                        name_map.insert(handle.agent_id, handle.name.clone());
-                        team_members.push(TeamConfigMember {
-                            name: handle.name.clone(),
-                            agent_id: handle.agent_id,
-                            agent_type: "teammate".to_string(),
-                            require_plan_approval: false,
-                        });
-                        self.write_team_config(&team_members)?;
-                        self.emit(AgentEvent::TeammateSpawned {
-                            agent_id: handle.agent_id,
-                            name: handle.name.clone(),
-                        });
-                        registry.register(handle);
-                        agents_spawned += 1;
-                        info!("Spawned replacement teammate");
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "Failed to spawn replacement");
+                let active = registry.active_count();
+                let max_agents = if self.teammate_specs.is_empty() {
+                    self.config.max_parallel_agents
+                } else {
+                    // Allow growth up to 2x for dynamically created tasks
+                    self.config.max_parallel_agents * 2
+                };
+                if active < max_agents && summary.pending > 0 {
+                    let name = format!("teammate-{}", agents_spawned + 1);
+                    match self.spawn_teammate(&name, String::new(), false).await {
+                        Ok(handle) => {
+                            name_map.insert(handle.agent_id, handle.name.clone());
+                            team_members.push(TeamConfigMember {
+                                name: handle.name.clone(),
+                                agent_id: handle.agent_id,
+                                agent_type: "teammate".to_string(),
+                                require_plan_approval: false,
+                            });
+                            self.write_team_config(&team_members)?;
+                            self.emit(AgentEvent::TeammateSpawned {
+                                agent_id: handle.agent_id,
+                                name: handle.name.clone(),
+                            });
+                            registry.register(handle);
+                            agents_spawned += 1;
+                            info!("Spawned additional teammate for pending tasks");
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to spawn additional teammate");
+                        }
                     }
                 }
             }
