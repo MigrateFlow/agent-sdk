@@ -633,6 +633,8 @@ impl OpenAiClient {
                         content.push_str(text);
                         if !has_tool_calls {
                             let _ = tx.send(StreamDelta::Text(text.clone()));
+                        } else {
+                            let _ = tx.send(StreamDelta::Thinking(text.clone()));
                         }
                     }
                 }
@@ -660,6 +662,11 @@ impl OpenAiClient {
                             }
                         }
                     }
+                }
+
+                // Check finish_reason for thinking text
+                if choice.finish_reason.as_deref() == Some("tool_calls") && !content.is_empty() {
+                    // Content before tool calls was thinking text — already sent as Thinking
                 }
             }
         }
