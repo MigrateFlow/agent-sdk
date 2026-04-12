@@ -408,5 +408,64 @@ pub fn builtin_subagents() -> Vec<SubAgentDef> {
             max_context_tokens: 200_000,
             background: false,
         },
+        SubAgentDef {
+            name: "code-reviewer".to_string(),
+            description: "Reviews code for bugs, security issues, style problems, and performance. \
+                Use when you need a second opinion on code changes or want a thorough review \
+                before committing. Read-only — does not modify files.".to_string(),
+            prompt: sdk_core::prompts::CODE_REVIEWER_PROMPT.to_string(),
+            allowed_tools: vec![
+                "read_file".to_string(),
+                "list_directory".to_string(),
+                "search_files".to_string(),
+                "run_command".to_string(),
+                "glob".to_string(),
+                "grep".to_string(),
+            ],
+            disallowed_tools: vec![
+                "write_file".to_string(),
+                "edit_file".to_string(),
+            ],
+            model: None,
+            max_turns: 20,
+            max_context_tokens: 200_000,
+            background: false,
+        },
+        SubAgentDef {
+            name: "test-runner".to_string(),
+            description: "Runs tests, analyzes failures, and suggests fixes. Use when you need \
+                to verify code changes pass tests, investigate test failures, or get a test \
+                status report. Read-only files but can run test commands.".to_string(),
+            prompt: sdk_core::prompts::TEST_RUNNER_PROMPT.to_string(),
+            allowed_tools: vec![
+                "read_file".to_string(),
+                "list_directory".to_string(),
+                "search_files".to_string(),
+                "run_command".to_string(),
+                "glob".to_string(),
+                "grep".to_string(),
+            ],
+            disallowed_tools: vec![
+                "write_file".to_string(),
+                "edit_file".to_string(),
+            ],
+            model: None,
+            max_turns: 15,
+            max_context_tokens: 200_000,
+            background: false,
+        },
+        SubAgentDef {
+            name: "refactor".to_string(),
+            description: "Restructures code while preserving behavior. Use for code cleanup, \
+                renaming, extracting functions, reorganizing modules, or other structural \
+                improvements. Has full file access including edit_file for surgical changes.".to_string(),
+            prompt: sdk_core::prompts::REFACTOR_PROMPT.to_string(),
+            allowed_tools: Vec::new(), // all tools
+            disallowed_tools: Vec::new(),
+            model: None,
+            max_turns: 25,
+            max_context_tokens: 200_000,
+            background: false,
+        },
     ]
 }
