@@ -42,6 +42,47 @@ pub fn is_plan_mode_tool(name: &str) -> bool {
     PLAN_MODE_READONLY_TOOLS.contains(&name)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_is_normal() {
+        assert_eq!(AgentMode::default(), AgentMode::Normal);
+    }
+
+    #[test]
+    fn display_matches_snake_case() {
+        assert_eq!(AgentMode::Normal.to_string(), "normal");
+        assert_eq!(AgentMode::Plan.to_string(), "plan");
+    }
+
+    #[test]
+    fn serde_roundtrip() {
+        let json = serde_json::to_string(&AgentMode::Plan).unwrap();
+        let back: AgentMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, AgentMode::Plan);
+    }
+
+    #[test]
+    fn is_plan_mode_tool_covers_readonly_list() {
+        for name in PLAN_MODE_READONLY_TOOLS {
+            assert!(is_plan_mode_tool(name));
+        }
+        assert!(!is_plan_mode_tool("write_file"));
+        assert!(!is_plan_mode_tool("run_command"));
+        assert!(!is_plan_mode_tool("edit_file"));
+    }
+
+    #[test]
+    fn plan_mode_suffix_contains_expected_headers() {
+        let s = plan_mode_system_suffix();
+        assert!(s.contains("PLAN MODE ACTIVE"));
+        assert!(s.contains("Read and explore only"));
+        assert!(s.contains("/exitplan"));
+    }
+}
+
 /// System prompt suffix appended when in Plan mode.
 pub fn plan_mode_system_suffix() -> &'static str {
     r#"

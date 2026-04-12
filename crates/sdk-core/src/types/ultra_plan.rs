@@ -149,3 +149,87 @@ You are in the **Implement** phase. Full tool access is restored. Execute your d
 "#,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_phase_is_research() {
+        assert_eq!(UltraPlanPhase::default(), UltraPlanPhase::Research);
+        assert_eq!(UltraPlanState::default().phase, UltraPlanPhase::Research);
+    }
+
+    #[test]
+    fn display_matches_title_case() {
+        assert_eq!(UltraPlanPhase::Research.to_string(), "Research");
+        assert_eq!(UltraPlanPhase::Design.to_string(), "Design");
+        assert_eq!(UltraPlanPhase::Review.to_string(), "Review");
+        assert_eq!(UltraPlanPhase::Implement.to_string(), "Implement");
+    }
+
+    #[test]
+    fn next_phase_advances_through_sequence_and_ends_at_implement() {
+        assert_eq!(
+            next_phase(&UltraPlanPhase::Research),
+            Some(UltraPlanPhase::Design)
+        );
+        assert_eq!(
+            next_phase(&UltraPlanPhase::Design),
+            Some(UltraPlanPhase::Review)
+        );
+        assert_eq!(
+            next_phase(&UltraPlanPhase::Review),
+            Some(UltraPlanPhase::Implement)
+        );
+        assert_eq!(next_phase(&UltraPlanPhase::Implement), None);
+    }
+
+    #[test]
+    fn allowed_tools_research_includes_exploration_and_subagents() {
+        let tools = allowed_tools_for_phase(&UltraPlanPhase::Research);
+        assert!(tools.contains(&"read_file"));
+        assert!(tools.contains(&"spawn_subagent"));
+        assert!(!tools.contains(&"run_command"));
+        assert!(!tools.contains(&"write_file"));
+    }
+
+    #[test]
+    fn allowed_tools_design_excludes_subagents_and_commands() {
+        let tools = allowed_tools_for_phase(&UltraPlanPhase::Design);
+        assert!(tools.contains(&"read_file"));
+        assert!(!tools.contains(&"spawn_subagent"));
+        assert!(!tools.contains(&"run_command"));
+    }
+
+    #[test]
+    fn allowed_tools_review_allows_run_command_but_not_writes() {
+        let tools = allowed_tools_for_phase(&UltraPlanPhase::Review);
+        assert!(tools.contains(&"run_command"));
+        assert!(!tools.contains(&"write_file"));
+        assert!(!tools.contains(&"spawn_subagent"));
+    }
+
+    #[test]
+    fn allowed_tools_implement_is_empty_meaning_all() {
+        assert!(allowed_tools_for_phase(&UltraPlanPhase::Implement).is_empty());
+    }
+
+    #[test]
+    fn phase_system_suffix_mentions_phase_name() {
+        assert!(phase_system_suffix(&UltraPlanPhase::Research).contains("RESEARCH"));
+        assert!(phase_system_suffix(&UltraPlanPhase::Design).contains("DESIGN"));
+        assert!(phase_system_suffix(&UltraPlanPhase::Review).contains("REVIEW"));
+        assert!(phase_system_suffix(&UltraPlanPhase::Implement).contains("IMPLEMENT"));
+    }
+
+    #[test]
+    fn ultra_plan_state_serde_roundtrip() {
+        let s = UltraPlanState {
+            phase: UltraPlanPhase::Review,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: UltraPlanState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.phase, UltraPlanPhase::Review);
+    }
+}
