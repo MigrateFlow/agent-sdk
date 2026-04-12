@@ -31,3 +31,41 @@ impl PromptBuilder for DefaultPromptBuilder {
         crate::prompts::teammate_user_message(task)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn task() -> Task {
+        Task::new("transform", "t", "d", PathBuf::from("f"))
+    }
+
+    #[test]
+    fn default_builder_system_prompt_contains_task_title() {
+        let b = DefaultPromptBuilder;
+        let p = b.build_system_prompt(
+            &task(),
+            &PathBuf::from("/src"),
+            &PathBuf::from("/work"),
+        );
+        assert!(p.contains("/src"));
+        assert!(p.contains("/work"));
+        assert!(p.contains("t"));
+    }
+
+    #[test]
+    fn default_builder_user_message_contains_task() {
+        let b = DefaultPromptBuilder;
+        let msg = b.build_user_message(&task());
+        assert!(msg.contains("Process this task: t"));
+    }
+
+    #[test]
+    fn default_customize_tools_returns_registry_unchanged() {
+        let b = DefaultPromptBuilder;
+        let reg = ToolRegistry::new();
+        let out = b.customize_tools(&task(), reg);
+        assert!(out.is_empty());
+    }
+}

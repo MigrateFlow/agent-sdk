@@ -235,3 +235,410 @@ impl Default for AgentConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Serialize env-dependent tests. Provider detection / resolution read process-wide
+    // env vars which would race if tests ran concurrently on the same threads.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Scoped env-var guard that snapshots the previous value and restores it on drop.
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn clear_all_provider_envs() -> Vec<EnvGuard> {
+        vec![
+            EnvGuard::unset("LLM_PROVIDER"),
+            EnvGuard::unset("LLM_MODEL"),
+            EnvGuard::unset("OPENAI_API_KEY"),
+            EnvGuard::unset("ANTHROPIC_API_KEY"),
+            EnvGuard::unset("OPENAI_API_BASE_URL"),
+            EnvGuard::unset("ANTHROPIC_API_BASE_URL"),
+            EnvGuard::unset("OPENAI_MODEL"),
+            EnvGuard::unset("ANTHROPIC_MODEL"),
+        ]
+    }
+
+    #[test]
+    fn agent_dir_constant() {
+        assert_eq!(AGENT_DIR, ".agent");
+    }
+
+    #[test]
+    fn provider_default_is_openai() {
+        assert_eq!(LlmProvider::default(), LlmProvider::OpenAi);
+    }
+
+    #[test]
+    fn provider_parse_claude_variants() {
+        assert_eq!(LlmProvider::parse("claude"), Some(LlmProvider::Claude));
+        assert_eq!(LlmProvider::parse("Claude"), Some(LlmProvider::Claude));
+        assert_eq!(LlmProvider::parse("ANTHROPIC"), Some(LlmProvider::Claude));
+        assert_eq!(
+            LlmProvider::parse("  anthropic  "),
+            Some(LlmProvider::Claude)
+        );
+    }
+
+    #[test]
+    fn provider_parse_openai_variants() {
+        assert_eq!(LlmProvider::parse("openai"), Some(LlmProvider::OpenAi));
+        assert_eq!(LlmProvider::parse("OpenAI"), Some(LlmProvider::OpenAi));
+        assert_eq!(LlmProvider::parse("open_ai"), Some(LlmProvider::OpenAi));
+    }
+
+    #[test]
+    fn provider_parse_unknown_returns_none() {
+        assert_eq!(LlmProvider::parse("gemini"), None);
+        assert_eq!(LlmProvider::parse(""), None);
+    }
+
+    #[test]
+    fn provider_env_accessors_cover_all_variants() {
+        for provider in [LlmProvider::Claude, LlmProvider::OpenAi] {
+            // Each accessor returns a non-empty constant and varies per provider.
+            assert!(!provider.api_key_env_var().is_empty());
+            assert!(!provider.base_url_env_var().is_empty());
+            assert!(!provider.model_env_var().is_empty());
+            assert!(!provider.default_base_url().is_empty());
+            assert!(!provider.default_model().is_empty());
+        }
+
+        assert_eq!(LlmProvider::Claude.api_key_env_var(), "ANTHROPIC_API_KEY");
+        assert_eq!(LlmProvider::OpenAi.api_key_env_var(), "OPENAI_API_KEY");
+        assert_eq!(
+            LlmProvider::Claude.base_url_env_var(),
+            "ANTHROPIC_API_BASE_URL"
+        );
+        assert_eq!(
+            LlmProvider::OpenAi.base_url_env_var(),
+            "OPENAI_API_BASE_URL"
+        );
+        assert_eq!(LlmProvider::Claude.model_env_var(), "ANTHROPIC_MODEL");
+        assert_eq!(LlmProvider::OpenAi.model_env_var(), "OPENAI_MODEL");
+        assert_eq!(
+            LlmProvider::Claude.default_base_url(),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(
+            LlmProvider::OpenAi.default_base_url(),
+            "https://api.openai.com"
+        );
+        assert_eq!(
+            LlmProvider::Claude.default_model(),
+            "claude-sonnet-4-20250514"
+        );
+        assert_eq!(LlmProvider::OpenAi.default_model(), "gpt-4o");
+    }
+
+    #[test]
+    fn provider_detect_honors_explicit_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _cleanup = clear_all_provider_envs();
+        let _override = EnvGuard::set("LLM_PROVIDER", "claude");
+        assert_eq!(LlmProvider::detect(), LlmProvider::Claude);
+    }
+
+    #[test]
+    fn provider_detect_invalid_env_falls_through_to_keys() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _cleanup = clear_all_provider_envs();
+        let _bogus = EnvGuard::set("LLM_PROVIDER", "not-a-provider");
+        let _anthropic = EnvGuard::set("ANTHROPIC_API_KEY", "sk-real");
+        assert_eq!(LlmProvider::detect(), LlmProvider::Claude);
+    }
+
+    #[test]
+    fn provider_detect_picks_openai_when_only_openai_key_set() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _cleanup = clear_all_provider_envs();
+        let _openai = EnvGuard::set("OPENAI_API_KEY", "sk-openai");
+        assert_eq!(LlmProvider::detect(), LlmProvider::OpenAi);
+    }
+
+    #[test]
+    fn provider_detect_blank_key_falls_back_to_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _cleanup = clear_all_provider_envs();
+        let _blank = EnvGuard::set("OPENAI_API_KEY", "   ");
+        // Both keys effectively absent -> default (OpenAi).
+        assert_eq!(LlmProvider::detect(), LlmProvider::OpenAi);
+    }
+
+    #[test]
+    fn provider_detect_defaults_when_both_keys_present() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _cleanup = clear_all_provider_envs();
+        let _a = EnvGuard::set("OPENAI_API_KEY", "sk-openai");
+        let _b = EnvGuard::set("ANTHROPIC_API_KEY", "sk-anthropic");
+        assert_eq!(LlmProvider::detect(), LlmProvider::default());
+    }
+
+    #[test]
+    fn llm_config_default_values() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _cleanup = clear_all_provider_envs();
+        let cfg = LlmConfig::default();
+        assert_eq!(cfg.provider, LlmProvider::OpenAi);
+        assert_eq!(cfg.model, LlmProvider::OpenAi.default_model());
+        assert_eq!(cfg.max_tokens, 4096);
+        assert_eq!(cfg.requests_per_minute, 50);
+        assert_eq!(cfg.tokens_per_minute, 80_000);
+        assert!(cfg.api_key.is_none());
+        assert!(cfg.api_base_url.is_none());
+        assert_eq!(cfg.http_timeout_secs, 300);
+        assert_eq!(cfg.max_retries, 3);
+        assert_eq!(cfg.retry_base_delay_ms, 1000);
+    }
+
+    #[test]
+    fn llm_config_default_respects_llm_model_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _cleanup = clear_all_provider_envs();
+        let _model = EnvGuard::set("LLM_MODEL", "override-model");
+        let cfg = LlmConfig::default();
+        assert_eq!(cfg.model, "override-model");
+    }
+
+    #[test]
+    fn llm_config_default_respects_provider_specific_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _cleanup = clear_all_provider_envs();
+        let _provider = EnvGuard::set("LLM_PROVIDER", "openai");
+        let _model = EnvGuard::set("OPENAI_MODEL", "gpt-from-env");
+        let cfg = LlmConfig::default();
+        assert_eq!(cfg.provider, LlmProvider::OpenAi);
+        assert_eq!(cfg.model, "gpt-from-env");
+    }
+
+    #[test]
+    fn resolved_provider_returns_clone() {
+        let cfg = LlmConfig {
+            provider: LlmProvider::Claude,
+            model: "m".into(),
+            max_tokens: 1,
+            requests_per_minute: 1,
+            tokens_per_minute: 1,
+            api_key: None,
+            api_base_url: None,
+            http_timeout_secs: 1,
+            max_retries: 0,
+            retry_base_delay_ms: 0,
+        };
+        assert_eq!(cfg.resolved_provider(), LlmProvider::Claude);
+    }
+
+    #[test]
+    fn resolve_model_prefers_configured_value() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _cleanup = clear_all_provider_envs();
+        let _env = EnvGuard::set("OPENAI_MODEL", "should-be-ignored");
+        let cfg = LlmConfig {
+            model: "configured".into(),
+            ..LlmConfig::default()
+        };
+        assert_eq!(cfg.resolve_model(), "configured");
+    }
+
+    #[test]
+    fn resolve_model_falls_back_to_provider_env_then_llm_model() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _cleanup = clear_all_provider_envs();
+        // Empty-string model triggers the fallback path.
+        let cfg = LlmConfig {
+            provider: LlmProvider::Claude,
+            model: "   ".into(),
+            ..LlmConfig::default()
+        };
+
+        // No env -> default model for provider.
+        assert_eq!(cfg.resolve_model(), LlmProvider::Claude.default_model());
+
+        // ANTHROPIC_MODEL takes precedence over LLM_MODEL.
+        let _anthropic = EnvGuard::set("ANTHROPIC_MODEL", "anthro-model");
+        let _llm = EnvGuard::set("LLM_MODEL", "llm-model");
+        assert_eq!(cfg.resolve_model(), "anthro-model");
+        drop(_anthropic);
+
+        // Only LLM_MODEL present.
+        assert_eq!(cfg.resolve_model(), "llm-model");
+    }
+
+    #[test]
+    fn resolve_model_ignores_blank_envs() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _cleanup = clear_all_provider_envs();
+        let _blank_specific = EnvGuard::set("OPENAI_MODEL", "");
+        let _blank_generic = EnvGuard::set("LLM_MODEL", "   ");
+        let cfg = LlmConfig {
+            provider: LlmProvider::OpenAi,
+            model: "".into(),
+            ..LlmConfig::default()
+        };
+        assert_eq!(cfg.resolve_model(), LlmProvider::OpenAi.default_model());
+    }
+
+    #[test]
+    fn resolve_api_key_prefers_config_then_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _cleanup = clear_all_provider_envs();
+
+        let cfg_with_key = LlmConfig {
+            api_key: Some("cfg-key".into()),
+            ..LlmConfig::default()
+        };
+        assert_eq!(cfg_with_key.resolve_api_key().as_deref(), Some("cfg-key"));
+
+        // Empty string in api_key should fall through to env.
+        let cfg_empty = LlmConfig {
+            provider: LlmProvider::OpenAi,
+            api_key: Some("".into()),
+            ..LlmConfig::default()
+        };
+        let _env = EnvGuard::set("OPENAI_API_KEY", "env-key");
+        assert_eq!(cfg_empty.resolve_api_key().as_deref(), Some("env-key"));
+
+        // No config key, no env -> None.
+        drop(_env);
+        let cfg_none = LlmConfig {
+            provider: LlmProvider::OpenAi,
+            api_key: None,
+            ..LlmConfig::default()
+        };
+        assert!(cfg_none.resolve_api_key().is_none());
+
+        // Blank env value treated as absent.
+        let _blank = EnvGuard::set("OPENAI_API_KEY", "   ");
+        assert!(cfg_none.resolve_api_key().is_none());
+    }
+
+    #[test]
+    fn resolve_base_url_prefers_config_then_env_then_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _cleanup = clear_all_provider_envs();
+
+        let cfg_with_url = LlmConfig {
+            provider: LlmProvider::Claude,
+            api_base_url: Some("https://proxy.example".into()),
+            ..LlmConfig::default()
+        };
+        assert_eq!(cfg_with_url.resolve_base_url(), "https://proxy.example");
+
+        // Empty api_base_url should fall through to env.
+        let cfg_empty = LlmConfig {
+            provider: LlmProvider::Claude,
+            api_base_url: Some("".into()),
+            ..LlmConfig::default()
+        };
+        let _env = EnvGuard::set("ANTHROPIC_API_BASE_URL", "https://env.example");
+        assert_eq!(cfg_empty.resolve_base_url(), "https://env.example");
+
+        drop(_env);
+
+        // No config, no env -> provider default.
+        let cfg_none = LlmConfig {
+            provider: LlmProvider::Claude,
+            api_base_url: None,
+            ..LlmConfig::default()
+        };
+        assert_eq!(
+            cfg_none.resolve_base_url(),
+            LlmProvider::Claude.default_base_url()
+        );
+    }
+
+    #[test]
+    fn llm_provider_serde_roundtrip() {
+        let json = serde_json::to_string(&LlmProvider::Claude).unwrap();
+        assert_eq!(json, "\"claude\"");
+        let parsed: LlmProvider = serde_json::from_str("\"open_ai\"").unwrap();
+        assert_eq!(parsed, LlmProvider::OpenAi);
+    }
+
+    #[test]
+    fn llm_config_deserialize_applies_defaults() {
+        let json = r#"{
+            "model": "m",
+            "max_tokens": 10,
+            "requests_per_minute": 1,
+            "tokens_per_minute": 2
+        }"#;
+        let cfg: LlmConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.provider, LlmProvider::OpenAi);
+        assert_eq!(cfg.http_timeout_secs, default_http_timeout_secs());
+        assert_eq!(cfg.max_retries, default_max_retries());
+        assert_eq!(cfg.retry_base_delay_ms, default_retry_base_delay_ms());
+        assert!(cfg.api_key.is_none());
+        assert!(cfg.api_base_url.is_none());
+    }
+
+    #[test]
+    fn agent_config_default_values() {
+        let cfg = AgentConfig::default();
+        assert_eq!(cfg.max_parallel_agents, 4);
+        assert_eq!(cfg.poll_interval_ms, 200);
+        assert_eq!(cfg.max_task_retries, 3);
+        assert_eq!(cfg.max_loop_iterations, 50);
+        assert_eq!(cfg.max_context_tokens, 200_000);
+        assert_eq!(cfg.max_idle_cycles, 50);
+        assert_eq!(cfg.plan_approval_timeout_secs, 300);
+        assert_eq!(cfg.command_timeout_secs, 30);
+    }
+
+    #[test]
+    fn agent_config_default_fns() {
+        // Hit each `default_*` helper directly.
+        assert_eq!(default_max_loop_iterations(), 50);
+        assert_eq!(default_max_context_tokens(), 200_000);
+        assert_eq!(default_max_idle_cycles(), 50);
+        assert_eq!(default_plan_approval_timeout_secs(), 300);
+        assert_eq!(default_command_timeout_secs(), 30);
+    }
+
+    #[test]
+    fn agent_config_deserialize_applies_defaults_for_missing_fields() {
+        let json = r#"{
+            "max_parallel_agents": 2,
+            "poll_interval_ms": 100,
+            "max_task_retries": 1
+        }"#;
+        let cfg: AgentConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.max_parallel_agents, 2);
+        assert_eq!(cfg.max_loop_iterations, default_max_loop_iterations());
+        assert_eq!(cfg.max_context_tokens, default_max_context_tokens());
+        assert_eq!(cfg.max_idle_cycles, default_max_idle_cycles());
+        assert_eq!(
+            cfg.plan_approval_timeout_secs,
+            default_plan_approval_timeout_secs()
+        );
+        assert_eq!(cfg.command_timeout_secs, default_command_timeout_secs());
+    }
+}

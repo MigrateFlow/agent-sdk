@@ -293,3 +293,136 @@ pub fn memory_context_section(index_content: &str) -> String {
          or keyword. Use `delete_memory` to remove outdated entries.",
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn sample_task() -> Task {
+        let mut t = Task::new(
+            "transform_file",
+            "Rename helper",
+            "Rename foo() to bar() in util.rs",
+            PathBuf::from("src/util.rs"),
+        );
+        t.dependencies.push(uuid::Uuid::new_v4());
+        t.context = serde_json::json!({"assigned_teammate": "alice"});
+        t
+    }
+
+    #[test]
+    fn cli_system_prompt_includes_working_directory_and_tools() {
+        let dir = PathBuf::from("/tmp/workspace");
+        let prompt = cli_system_prompt(&dir);
+        assert!(prompt.contains("/tmp/workspace"));
+        assert!(prompt.contains("read_file"));
+        assert!(prompt.contains("spawn_agent_team"));
+        assert!(prompt.contains("spawn_subagent"));
+    }
+
+    #[test]
+    fn teammate_system_prompt_embeds_task_fields() {
+        let task = sample_task();
+        let prompt = teammate_system_prompt(
+            &task,
+            &PathBuf::from("/src"),
+            &PathBuf::from("/out"),
+        );
+        assert!(prompt.contains("/src"));
+        assert!(prompt.contains("/out"));
+        assert!(prompt.contains("Rename helper"));
+        assert!(prompt.contains("Rename foo() to bar() in util.rs"));
+        assert!(prompt.contains("src/util.rs"));
+    }
+
+    #[test]
+    fn single_agent_system_prompt_references_dirs() {
+        let p = single_agent_system_prompt(
+            &PathBuf::from("/s"),
+            &PathBuf::from("/w"),
+        );
+        assert!(p.contains("/s"));
+        assert!(p.contains("/w"));
+        assert!(p.contains("Read files before modifying them"));
+    }
+
+    #[test]
+    fn subagent_system_prompt_wraps_custom_prompt_with_context() {
+        let p = subagent_system_prompt(
+            "Custom role here.",
+            &PathBuf::from("/src"),
+            &PathBuf::from("/work"),
+        );
+        assert!(p.starts_with("Custom role here."));
+        assert!(p.contains("/src"));
+        assert!(p.contains("/work"));
+        assert!(p.contains("CANNOT spawn other subagents"));
+    }
+
+    #[test]
+    fn teammate_role_suffix_appends_role_text() {
+        let s = teammate_role_suffix("backend specialist");
+        assert!(s.contains("backend specialist"));
+        assert!(s.starts_with("\n\n## Teammate Role\n"));
+    }
+
+    #[test]
+    fn plan_mode_prompt_contains_system_and_task() {
+        let task = sample_task();
+        let p = plan_mode_prompt("<BASE>", &task);
+        assert!(p.starts_with("<BASE>"));
+        assert!(p.contains("PLAN MODE"));
+        assert!(p.contains(&task.title));
+        assert!(p.contains(&task.description));
+    }
+
+    #[test]
+    fn plan_review_prompts_are_stable() {
+        assert_eq!(
+            plan_review_system_prompt(),
+            "You are a technical lead reviewing implementation plans."
+        );
+        let tid = uuid::Uuid::new_v4();
+        let msg = plan_review_user_prompt(&tid, "Step 1. Step 2.");
+        assert!(msg.contains(&tid.to_string()));
+        assert!(msg.contains("Step 1. Step 2."));
+        assert!(msg.contains("APPROVED"));
+        assert!(msg.contains("REJECTED"));
+    }
+
+    #[test]
+    fn teammate_user_message_uses_assigned_teammate_when_present() {
+        let task = sample_task();
+        let msg = teammate_user_message(&task);
+        assert!(msg.contains("Process this task: Rename helper"));
+        assert!(msg.contains("Target: src/util.rs"));
+        assert!(msg.contains("Assigned teammate: alice"));
+        assert!(msg.contains("Dependencies:"));
+    }
+
+    #[test]
+    fn teammate_user_message_falls_back_to_unassigned() {
+        let mut task = sample_task();
+        task.context = serde_json::Value::Null; // no assigned_teammate
+        let msg = teammate_user_message(&task);
+        assert!(msg.contains("Assigned teammate: unassigned"));
+    }
+
+    #[test]
+    fn memory_context_section_inlines_index_content() {
+        let body = memory_context_section("- foo: bar");
+        assert!(body.starts_with("\n\n# Project Memory"));
+        assert!(body.contains("- foo: bar"));
+        assert!(body.contains("read_memory"));
+        assert!(body.contains("delete_memory"));
+    }
+
+    #[test]
+    fn role_prompt_constants_are_non_empty_and_documented() {
+        // Sanity-check the static prompt strings referenced by subagent presets.
+        assert!(CODE_REVIEWER_PROMPT.contains("code reviewer"));
+        assert!(TEST_RUNNER_PROMPT.contains("test"));
+        assert!(REFACTOR_PROMPT.contains("refactor") || REFACTOR_PROMPT.contains("Refactor"));
+    }
+}

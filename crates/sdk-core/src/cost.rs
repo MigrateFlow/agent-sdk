@@ -194,4 +194,100 @@ mod tests {
         let usd = estimate_usd("claude-opus-4-6", 1000, 1000, 0, 0);
         assert!((usd - 90.0).abs() < 1e-9);
     }
+
+    #[test]
+    fn estimate_usd_includes_cache_terms() {
+        // Opus: cache_write $18.75/1K, cache_read $1.50/1K
+        let usd = estimate_usd("claude-opus-4-6", 0, 0, 2_000, 10_000);
+        let expected = 2.0 * 18.75 + 10.0 * 1.50;
+        assert!((usd - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn estimate_usd_for_unknown_model_is_zero() {
+        assert_eq!(estimate_usd("nothing-like-this", 10_000, 10_000, 0, 0), 0.0);
+    }
+
+    #[test]
+    fn estimate_usd_matches_prefix_with_date_suffix() {
+        // Sonnet input $3/1K, output $15/1K → 1K+1K = $18
+        let usd = estimate_usd("claude-sonnet-4-5-20250929", 1000, 1000, 0, 0);
+        assert!((usd - 18.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cost_tracker_creates_parent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("nested/sessions");
+        let tracker = CostTracker::new(&target).unwrap();
+        assert!(target.exists());
+        assert_eq!(tracker.path(), target.join("cost.jsonl"));
+    }
+
+    #[test]
+    fn cost_tracker_records_post_llm_requests_as_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let tracker = CostTracker::new(dir.path()).unwrap();
+        let event = HookEvent::PostLlmRequest {
+            tokens_in: 1000,
+            tokens_out: 500,
+            cache_in: 0,
+            cache_read: 0,
+            duration_ms: 12,
+            model: "claude-opus-4-6".into(),
+        };
+        // Hook must return Continue.
+        matches!(tracker.on_event(&event), HookResult::Continue);
+        // And append a valid JSON row.
+        let rows = CostTracker::read_all(tracker.path()).unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.model, "claude-opus-4-6");
+        assert_eq!(row.tokens_in, 1000);
+        assert_eq!(row.tokens_out, 500);
+        // 1K input + 0.5K output on opus = 15 + 37.5 = 52.5
+        assert!((row.estimated_usd - 52.5).abs() < 1e-9);
+        // Timestamp is RFC 3339: parsing must succeed.
+        chrono::DateTime::parse_from_rfc3339(&row.timestamp).expect("rfc3339");
+    }
+
+    #[test]
+    fn cost_tracker_ignores_other_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let tracker = CostTracker::new(dir.path()).unwrap();
+        let event = HookEvent::PreLlmRequest { message_count: 1 };
+        matches!(tracker.on_event(&event), HookResult::Continue);
+        let rows = CostTracker::read_all(tracker.path()).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn read_all_returns_empty_when_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = CostTracker::read_all(dir.path().join("missing.jsonl")).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn read_all_skips_malformed_and_blank_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cost.jsonl");
+        let good = CostRecord {
+            timestamp: "2026-04-13T00:00:00Z".into(),
+            model: "gpt-4o".into(),
+            tokens_in: 1,
+            tokens_out: 2,
+            cache_in: 0,
+            cache_read: 0,
+            estimated_usd: 0.01,
+        };
+        let body = format!(
+            "{}\n\nnot-json garbage\n{}\n",
+            serde_json::to_string(&good).unwrap(),
+            serde_json::to_string(&good).unwrap()
+        );
+        std::fs::write(&path, body).unwrap();
+        let rows = CostTracker::read_all(&path).unwrap();
+        assert_eq!(rows.len(), 2);
+    }
 }
