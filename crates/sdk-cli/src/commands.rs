@@ -475,19 +475,31 @@ impl SlashCommand for StatusCommand {
             }
         };
 
+        let session_id = crate::session_manager::SessionManager::session_id_from_path(&ctx.session_path);
+        let active_label = if *ctx.turns > 0 { "active" } else { "new" };
+
         let mut lines = vec![
             format!(
-                "{} · {} · {} tool {} · {} messages",
-                style(format!("{} turns", *ctx.turns)).white(),
-                style(format!("{} tokens", format_token_count(*ctx.total_tokens))).white(),
-                style(*ctx.tool_calls).white(),
-                if *ctx.tool_calls == 1 { "use" } else { "uses" },
-                style(ctx.messages.len()).dim(),
+                "{}  {}",
+                style("Mode:").dim(),
+                if mode_str == "normal" { style(mode_str).dim() } else { style(mode_str).yellow() },
             ),
             format!(
-                "{} {}",
-                style("mode:").dim(),
-                if mode_str == "normal" { style(mode_str).dim() } else { style(mode_str).yellow() },
+                "{}  {} ({}, {} turn{})",
+                style("Session:").dim(),
+                style(&session_id).white(),
+                style(active_label).dim(),
+                *ctx.turns,
+                if *ctx.turns == 1 { "" } else { "s" },
+            ),
+            format!(
+                "{}  {} ({} messages {} {} tool {})",
+                style("Tokens:").dim(),
+                style(format_token_count(*ctx.total_tokens)).white(),
+                style(ctx.messages.len()).dim(),
+                style("·").dim(),
+                style(*ctx.tool_calls).dim(),
+                style(if *ctx.tool_calls == 1 { "use" } else { "uses" }).dim(),
             ),
         ];
 
@@ -496,8 +508,8 @@ impl SlashCommand for StatusCommand {
             let stats = cache.file_cache.stats();
             if stats.entries > 0 {
                 lines.push(format!(
-                    "{} {} entries, {}",
-                    style("cache:").dim(),
+                    "{}  {} entries, {}",
+                    style("Cache:").dim(),
                     stats.entries,
                     style(format_bytes(stats.total_bytes as u64)).dim(),
                 ));
@@ -507,7 +519,7 @@ impl SlashCommand for StatusCommand {
         eprintln!();
         let title = format!(
             "{} {}",
-            style("Session").bold(),
+            style("Status").bold(),
             style(display_path(session_file)).dim(),
         );
         crate::ui::Panel::new().title(title).color(console::Color::Cyan).render(&lines);
