@@ -1,3 +1,4 @@
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::process::Stdio;
 
@@ -13,6 +14,7 @@ use sdk_core::types::usage::TokenUsage;
 use sdk_core::traits::llm_client::LlmClient;
 use sdk_core::traits::tool::ToolDefinition;
 
+use super::cache_policy::{CachePolicy, CacheMetrics};
 use super::rate_limiter::RateLimiter;
 use super::retry::{RetryConfig, handle_retryable_status};
 
@@ -26,6 +28,8 @@ pub struct ClaudeClient {
     base_url: String,
     rate_limiter: RateLimiter,
     retry_config: RetryConfig,
+    cache_policy: CachePolicy,
+    cache_metrics: Arc<Mutex<CacheMetrics>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -33,7 +37,7 @@ struct ApiRequest {
     model: String,
     max_tokens: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<serde_json::Value>,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<AnthropicToolDef>,
@@ -75,6 +79,8 @@ struct AnthropicToolDef {
     name: String,
     description: String,
     input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -211,13 +217,23 @@ fn anthropic_response_to_chat(response: &ApiResponse) -> ChatMessage {
     }
 }
 
-fn tool_defs_to_anthropic(tools: &[ToolDefinition]) -> Vec<AnthropicToolDef> {
+fn tool_defs_to_anthropic(tools: &[ToolDefinition], cache_last: bool) -> Vec<AnthropicToolDef> {
+    let len = tools.len();
     tools
         .iter()
-        .map(|t| AnthropicToolDef {
-            name: t.name.clone(),
-            description: t.description.clone(),
-            input_schema: t.parameters.clone(),
+        .enumerate()
+        .map(|(i, t)| {
+            let cache_control = if cache_last && i == len - 1 {
+                Some(serde_json::json!({"type": "ephemeral"}))
+            } else {
+                None
+            };
+            AnthropicToolDef {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                input_schema: t.parameters.clone(),
+                cache_control,
+            }
         })
         .collect()
 }
@@ -246,7 +262,18 @@ impl ClaudeClient {
             base_url,
             rate_limiter: RateLimiter::new(config.requests_per_minute),
             retry_config: RetryConfig::from_llm_config(config),
+            cache_policy: CachePolicy::default(),
+            cache_metrics: Arc::new(Mutex::new(CacheMetrics::default())),
         })
+    }
+
+    pub fn with_cache_policy(mut self, policy: CachePolicy) -> Self {
+        self.cache_policy = policy;
+        self
+    }
+
+    pub fn cache_metrics(&self) -> Arc<Mutex<CacheMetrics>> {
+        self.cache_metrics.clone()
     }
 
     async fn send_request(&self, request: &ApiRequest) -> SdkResult<ApiResponse> {
@@ -308,6 +335,42 @@ impl ClaudeClient {
                     message: body,
                 });
             }
+        }
+    }
+
+    fn usage_from_response(&self, response: &ApiResponse) -> TokenUsage {
+        TokenUsage {
+            input_tokens: response.usage.input_tokens,
+            output_tokens: response.usage.output_tokens,
+            cache_creation_input_tokens: response.usage.cache_creation_input_tokens.unwrap_or(0),
+            cache_read_input_tokens: response.usage.cache_read_input_tokens.unwrap_or(0),
+            model: response.model.clone(),
+        }
+    }
+
+    fn build_system_value(&self, text: Option<String>) -> Option<serde_json::Value> {
+        let text = text?;
+        if self.cache_policy.cache_system_prompt {
+            Some(serde_json::json!([
+                {
+                    "type": "text",
+                    "text": text,
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ]))
+        } else {
+            Some(serde_json::Value::String(text))
+        }
+    }
+
+    fn build_tools(&self, tools: &[ToolDefinition]) -> Vec<AnthropicToolDef> {
+        let cache_last = self.cache_policy.cache_tools && !tools.is_empty();
+        tool_defs_to_anthropic(tools, cache_last)
+    }
+
+    fn update_cache_metrics(&self, usage: &TokenUsage) {
+        if let Ok(mut metrics) = self.cache_metrics.lock() {
+            metrics.update(usage);
         }
     }
 
@@ -392,7 +455,7 @@ impl LlmClient for ClaudeClient {
         let request = ApiRequest {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
-            system: Some(system.to_string()),
+            system: self.build_system_value(Some(system.to_string())),
             messages: vec![AnthropicMessage {
                 role: "user".to_string(),
                 content: AnthropicContent::Text(user_message.to_string()),
@@ -401,6 +464,9 @@ impl LlmClient for ClaudeClient {
         };
 
         let response = self.send_request(&request).await?;
+        let usage = self.usage_from_response(&response);
+        self.update_cache_metrics(&usage);
+
         let text = response
             .content
             .iter()
@@ -411,8 +477,7 @@ impl LlmClient for ClaudeClient {
             .collect::<Vec<_>>()
             .join("");
 
-        let tokens = response.usage.total_tokens();
-        Ok((text, tokens))
+        Ok((text, usage.total()))
     }
 
     async fn chat(
@@ -430,27 +495,19 @@ impl LlmClient for ClaudeClient {
         tools: &[ToolDefinition],
     ) -> SdkResult<(ChatMessage, TokenUsage)> {
         let (system_prompt, anthropic_msgs) = chat_messages_to_anthropic(messages);
-        let anthropic_tools = tool_defs_to_anthropic(tools);
+        let anthropic_tools = self.build_tools(tools);
 
         let request = ApiRequest {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
-            system: system_prompt,
+            system: self.build_system_value(system_prompt),
             messages: anthropic_msgs,
             tools: anthropic_tools,
         };
 
         let response = self.send_request(&request).await?;
-        let usage = TokenUsage {
-            input_tokens: response.usage.input_tokens,
-            output_tokens: response.usage.output_tokens,
-            cache_creation_input_tokens: response
-                .usage
-                .cache_creation_input_tokens
-                .unwrap_or(0),
-            cache_read_input_tokens: response.usage.cache_read_input_tokens.unwrap_or(0),
-            model: response.model.clone(),
-        };
+        let usage = self.usage_from_response(&response);
+        self.update_cache_metrics(&usage);
         let chat_msg = anthropic_response_to_chat(&response);
         Ok((chat_msg, usage))
     }
