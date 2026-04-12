@@ -9,6 +9,7 @@ pub mod agent;
 pub mod tools;
 pub mod prompts;
 pub mod storage;
+pub mod mcp;
 
 // Convenience re-exports
 pub use error::{AgentId, TaskId, SdkError, SdkResult};
@@ -29,3 +30,4 @@ pub use types::chat::ChatMessage;
 pub use types::task::{Task, TaskResult, TaskStatus};
 pub use llm::create_client;
 pub use storage::AgentPaths;
+pub use mcp::{McpClient, McpConfig, McpServerSpec};

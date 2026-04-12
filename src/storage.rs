@@ -41,6 +41,10 @@ impl AgentPaths {
         self.project_config_dir().join("settings.local.json")
     }
 
+    pub fn project_mcp_config_path(&self) -> PathBuf {
+        self.project_config_dir().join("mcp.json")
+    }
+
     pub fn user_root_dir(&self) -> PathBuf {
         self.home_dir.clone()
     }
