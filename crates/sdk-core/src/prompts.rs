@@ -30,6 +30,10 @@ You have these tools. Use them proactively — don't ask for permission.
 - `update_task_list` — Update the visible Task list for multi-step work
 - `spawn_agent_team` — Spawn parallel agents for complex, multi-part tasks
 - `spawn_subagent` — Spawn a focused subagent in its own context window
+- `read_memory` / `write_memory` / `list_memory` / `search_memory` / `delete_memory` — Persistent key-value memory (survives across sessions)
+- `lsp_goto_definition` — Jump to the definition of a symbol at a given position (requires LSP server)
+- `lsp_find_references` — Find all references to a symbol at a given position (requires LSP server)
+- `lsp_document_symbols` — List all symbols (functions, types, etc.) in a file (requires LSP server)
 
 # How to work
 

@@ -20,13 +20,14 @@ use agent_sdk::cli::{
     session::{default_session_path, load_session, CliTask},
     CommandContext, CommandOutcome, SlashCommandRegistry,
 };
-use agent_sdk::{AgentEvent, AgentMode, PLAN_MODE_READONLY_TOOLS, StreamDelta, UltraPlanState};
+use agent_sdk::{AgentEvent, AgentId, AgentMode, AgentPaths, MemoryStore, PLAN_MODE_READONLY_TOOLS, StreamDelta, UltraPlanState};
 use agent_sdk::types::ultra_plan::{allowed_tools_for_phase, phase_system_suffix};
 use clap::Parser;
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 use serde_json::json;
+use uuid::Uuid;
 
 // ─── CLI args ────────────────────────────────────────────────────────────────
 
@@ -97,6 +98,17 @@ enum NdjsonEvent {
     TextDelta { content: String },
     Completed { final_content: String, tokens_used: u64, iterations: usize, tool_calls: usize },
     Failed { error: String },
+    // Team/subagent events for programmatic consumers
+    TeamSpawned { teammate_count: usize },
+    SubagentSpawned { name: String, description: String },
+    SubagentProgress { name: String, iteration: usize, max_turns: usize, current_tool: Option<String>, tokens_so_far: u64 },
+    SubagentCompleted { name: String, tokens_used: u64, iterations: usize, tool_calls: usize },
+    SubagentFailed { name: String, error: String },
+    TaskStarted { name: String, title: String },
+    TaskCompleted { name: String, title: String, tokens_used: u64 },
+    TaskFailed { name: String, title: String, error: String },
+    #[allow(dead_code)]
+    PlanModeChanged { mode: String },
 }
 
 fn emit_ndjson(event: &NdjsonEvent) {
@@ -121,7 +133,14 @@ fn git_branch(work_dir: &Path) -> Option<String> {
     }
 }
 
-fn print_welcome(model: &str, work_dir: &Path, tool_count: usize) {
+fn print_welcome(
+    model: &str,
+    provider: &str,
+    work_dir: &Path,
+    tool_count: usize,
+    mcp_count: usize,
+    session_id: Option<&str>,
+) {
     let version = env!("CARGO_PKG_VERSION");
     let branch = git_branch(work_dir);
     let dir = display_path(work_dir);
@@ -140,15 +159,35 @@ fn print_welcome(model: &str, work_dir: &Path, tool_count: usize) {
     };
     eprintln!("   {} {}", style("cwd:").dim(), cwd_line);
     eprintln!(
-        "   {} {} · {} tools",
+        "   {} {} ({}) · {} tools",
         style("model:").dim(),
         model,
+        style(provider).dim(),
         style(tool_count).dim(),
     );
+    if mcp_count > 0 {
+        eprintln!(
+            "   {} {} server{}",
+            style("mcp:").dim(),
+            style(mcp_count).dim(),
+            if mcp_count == 1 { "" } else { "s" },
+        );
+    }
+    if let Some(id) = session_id {
+        eprintln!(
+            "   {} {}",
+            style("session:").dim(),
+            style(id).dim(),
+        );
+    }
     eprintln!();
     eprintln!(
         "   {}",
         style("/help for commands · Ctrl+C to interrupt · Ctrl+C twice to quit").dim()
+    );
+    eprintln!(
+        "   {}",
+        style("────────────────────────────────────────────────────").dim()
     );
     eprintln!();
 }
@@ -506,6 +545,28 @@ fn arg_str<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(|v| v.as_str())
 }
 
+/// Infer a language hint from file extension for display.
+fn lang_hint(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("") {
+        "rs" => ", Rust",
+        "ts" | "tsx" => ", TypeScript",
+        "js" | "jsx" => ", JavaScript",
+        "py" => ", Python",
+        "go" => ", Go",
+        "java" => ", Java",
+        "rb" => ", Ruby",
+        "toml" => ", TOML",
+        "json" => ", JSON",
+        "yaml" | "yml" => ", YAML",
+        "md" => ", Markdown",
+        "html" => ", HTML",
+        "css" => ", CSS",
+        "sh" | "bash" => ", Shell",
+        "sql" => ", SQL",
+        _ => "",
+    }
+}
+
 fn humanize(name: &str) -> String {
     let mut out = String::new();
     for (i, part) in name.split('_').filter(|s| !s.is_empty()).enumerate() {
@@ -724,6 +785,9 @@ fn build_tools(
     background_tx: Option<tokio::sync::mpsc::UnboundedSender<agent_sdk::agent::agent_loop::BackgroundResult>>,
     tool_filter: Option<&[String]>,
     mcp_tools: &[Arc<dyn Tool>],
+    paths: &AgentPaths,
+    memory_store: Option<Arc<MemoryStore>>,
+    cli_agent_id: AgentId,
 ) -> ToolRegistry {
     let filter = tool_filter
         .map(|names| ToolFilter::allow_only(names.iter().cloned()))
@@ -740,6 +804,7 @@ fn build_tools(
             work_dir.to_path_buf(),
             command_policy,
         )
+        .add_lsp_tools(paths.project_lsp_config_path(), work_dir.to_path_buf())
         .add_team_tool(TeamToolConfig {
             work_dir: work_dir.to_path_buf(),
             source_root: work_dir.to_path_buf(),
@@ -756,6 +821,11 @@ fn build_tools(
             registry: subagent_registry,
             background_tx,
         });
+
+    // Wire memory tools into the CLI agent
+    if let Some(store) = memory_store {
+        builder = builder.add_memory_tools(store, cli_agent_id);
+    }
 
     builder = builder.add_custom_tool(Arc::new(UpdateTaskListTool { tasks }));
 
@@ -807,6 +877,7 @@ fn read_input_buffered() -> io::Result<String> {
 struct TurnStats {
     tokens: u64,
     tool_calls: usize,
+    iterations: usize,
     duration: std::time::Duration,
 }
 
@@ -825,6 +896,9 @@ async fn run_turn(
     json_mode: bool,
     tool_filter: Option<&[String]>,
     mcp_tools: &[Arc<dyn Tool>],
+    paths: &AgentPaths,
+    memory_store: Option<Arc<MemoryStore>>,
+    cli_agent_id: AgentId,
 ) -> anyhow::Result<TurnStats> {
     // Create background result channel — tools send completed background results
     // here, and we drain them before each LLM call to inject into conversation.
@@ -842,6 +916,9 @@ async fn run_turn(
         Some(background_tx),
         tool_filter,
         mcp_tools,
+        paths,
+        memory_store,
+        cli_agent_id,
     );
     let tool_defs = tools.definitions();
     let started = Instant::now();
@@ -888,6 +965,7 @@ async fn run_turn(
             return Ok(TurnStats {
                 tokens: total_tokens,
                 tool_calls: tool_calls_count,
+                iterations: iteration + 1,
                 duration: started.elapsed(),
             });
         }
@@ -966,6 +1044,7 @@ async fn run_turn(
             return Ok(TurnStats {
                 tokens: total_tokens,
                 tool_calls: tool_calls_count,
+                iterations: iteration + 1,
                 duration: started.elapsed(),
             });
         }
@@ -1014,6 +1093,14 @@ async fn run_turn(
 
                 messages.push(response.clone());
 
+                // Show iteration indicator for multi-iteration turns
+                if !json_mode && iteration > 0 {
+                    eprintln!(
+                        "  {}",
+                        style(format!("[iter {}]", iteration + 1)).dim()
+                    );
+                }
+
                 let tc_count = tool_calls.len();
                 for (tc_idx, tc) in tool_calls.iter().enumerate() {
                     let is_last_tc = tc_idx == tc_count - 1;
@@ -1027,78 +1114,87 @@ async fn run_turn(
                         });
                     } else {
                         let label = format_tool_label(&tc.function.name, &tc.function.arguments);
-                        eprintln!("  {} {}", style("⎿").cyan(), label);
+                        let connector = if is_last_tc { "└" } else { "├" };
+                        eprintln!("  {} {}", style(connector).cyan(), label);
 
                         if tc.function.name == "spawn_agent_team" {
                             print_team_plan(&tc.function.arguments);
                         }
 
-                        // Show write_file content preview
+                        // Show write_file content preview with header
                         if tc.function.name == "write_file" {
                             let args: serde_json::Value =
                                 serde_json::from_str(&tc.function.arguments).unwrap_or_default();
                             if let Some(content) = args["content"].as_str() {
+                                let path = args["path"].as_str().unwrap_or("?");
+                                let lang = lang_hint(path);
                                 let lines: Vec<&str> = content.lines().collect();
+                                eprintln!(
+                                    "  {}  {}",
+                                    style("│").dim(),
+                                    style(format!("── {} ({} lines{}) ──", path, lines.len(), lang)).dim()
+                                );
                                 let show = lines.len().min(8);
-                                for (i, line) in lines[..show].iter().enumerate() {
-                                    let prefix = if i == show - 1 && is_last_tc {
-                                        "  ⎿"
-                                    } else {
-                                        "  │"
-                                    };
+                                for line in &lines[..show] {
                                     eprintln!(
-                                        "  {} {}",
-                                        style(prefix).dim(),
+                                        "  {}  {}",
+                                        style("│").dim(),
                                         style(truncate(line, 100)).dim()
                                     );
                                 }
                                 if lines.len() > show {
                                     eprintln!(
-                                        "  {} {}",
-                                        style("  │").dim(),
+                                        "  {}  {}",
+                                        style("│").dim(),
                                         style(format!("… +{} more lines", lines.len() - show)).dim()
                                     );
                                 }
                             }
                         }
 
-                        // Show edit_file diff preview
+                        // Show edit_file diff preview with header
                         if tc.function.name == "edit_file" {
                             let args: serde_json::Value =
                                 serde_json::from_str(&tc.function.arguments).unwrap_or_default();
                             let old = args["old_string"].as_str().unwrap_or("");
                             let new = args["new_string"].as_str().unwrap_or("");
                             if !old.is_empty() || !new.is_empty() {
+                                let path = args["path"].as_str().unwrap_or("?");
+                                eprintln!(
+                                    "  {}  {}",
+                                    style("│").dim(),
+                                    style(format!("@@ {} @@", path)).cyan().dim()
+                                );
                                 let old_lines: Vec<&str> = old.lines().collect();
                                 let new_lines: Vec<&str> = new.lines().collect();
-                                let max_preview = 4;
+                                let max_preview = 6;
                                 let show_old = old_lines.len().min(max_preview);
                                 let show_new = new_lines.len().min(max_preview);
                                 for line in &old_lines[..show_old] {
                                     eprintln!(
-                                        "  {} {}",
-                                        style("  │").dim(),
+                                        "  {}  {}",
+                                        style("│").dim(),
                                         style(format!("- {}", truncate(line, 90))).red().dim()
                                     );
                                 }
                                 if old_lines.len() > show_old {
                                     eprintln!(
-                                        "  {} {}",
-                                        style("  │").dim(),
+                                        "  {}  {}",
+                                        style("│").dim(),
                                         style(format!("  … +{} more", old_lines.len() - show_old)).dim()
                                     );
                                 }
                                 for line in &new_lines[..show_new] {
                                     eprintln!(
-                                        "  {} {}",
-                                        style("  │").dim(),
+                                        "  {}  {}",
+                                        style("│").dim(),
                                         style(format!("+ {}", truncate(line, 90))).green().dim()
                                     );
                                 }
                                 if new_lines.len() > show_new {
                                     eprintln!(
-                                        "  {} {}",
-                                        style("  │").dim(),
+                                        "  {}  {}",
+                                        style("│").dim(),
                                         style(format!("  … +{} more", new_lines.len() - show_new)).dim()
                                     );
                                 }
@@ -1109,7 +1205,9 @@ async fn run_turn(
                     let args: serde_json::Value =
                         serde_json::from_str(&tc.function.arguments).unwrap_or_default();
 
+                    let tool_start = Instant::now();
                     let result = tools.execute(&tc.function.name, args).await;
+                    let tool_elapsed = tool_start.elapsed();
 
                     let result_content = match &result {
                         Ok(val) => {
@@ -1128,7 +1226,12 @@ async fn run_turn(
                         });
                     } else {
                         let preview = format_result_preview(&tc.function.name, &result_content);
-                        eprintln!("    {}", style(&preview).dim());
+                        let timing = if tool_elapsed.as_secs_f64() > 1.0 {
+                            format!(" ({})", format_duration(tool_elapsed))
+                        } else {
+                            String::new()
+                        };
+                        eprintln!("    {}{}", style(&preview).dim(), style(&timing).dim());
 
                         if tc.function.name == "spawn_agent_team" {
                             print_team_result_summary(&result_content);
@@ -1170,6 +1273,7 @@ async fn run_turn(
                 return Ok(TurnStats {
                     tokens: total_tokens,
                     tool_calls: tool_calls_count,
+                    iterations: iteration + 1,
                     duration: started.elapsed(),
                 });
             }
@@ -1197,6 +1301,7 @@ async fn run_turn(
                 return Ok(TurnStats {
                     tokens: total_tokens,
                     tool_calls: tool_calls_count,
+                    iterations: iteration + 1,
                     duration: started.elapsed(),
                 });
             }
@@ -1218,6 +1323,7 @@ async fn run_turn(
     Ok(TurnStats {
         tokens: total_tokens,
         tool_calls: tool_calls_count,
+        iterations: max_iterations,
         duration: started.elapsed(),
     })
 }
@@ -1279,6 +1385,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Event channel for team monitoring ──
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    let event_json_mode = cli.json;
 
     tokio::spawn(async move {
         // Color palette for agents — cycle through these
@@ -1312,6 +1419,38 @@ async fn main() -> anyhow::Result<()> {
         };
 
         while let Some(event) = event_rx.recv().await {
+            // In JSON mode, emit structured NDJSON for key events
+            if event_json_mode {
+                match &event {
+                    AgentEvent::TeamSpawned { teammate_count } => {
+                        emit_ndjson(&NdjsonEvent::TeamSpawned { teammate_count: *teammate_count });
+                    }
+                    AgentEvent::SubAgentSpawned { name, description, .. } => {
+                        emit_ndjson(&NdjsonEvent::SubagentSpawned { name: name.clone(), description: description.clone() });
+                    }
+                    AgentEvent::SubAgentProgress { name, iteration, max_turns, current_tool, tokens_so_far, .. } => {
+                        emit_ndjson(&NdjsonEvent::SubagentProgress { name: name.clone(), iteration: *iteration, max_turns: *max_turns, current_tool: current_tool.clone(), tokens_so_far: *tokens_so_far });
+                    }
+                    AgentEvent::SubAgentCompleted { name, tokens_used, iterations, tool_calls, .. } => {
+                        emit_ndjson(&NdjsonEvent::SubagentCompleted { name: name.clone(), tokens_used: *tokens_used, iterations: *iterations, tool_calls: *tool_calls });
+                    }
+                    AgentEvent::SubAgentFailed { name, error, .. } => {
+                        emit_ndjson(&NdjsonEvent::SubagentFailed { name: name.clone(), error: error.clone() });
+                    }
+                    AgentEvent::TaskStarted { name, title, .. } => {
+                        emit_ndjson(&NdjsonEvent::TaskStarted { name: name.clone(), title: title.clone() });
+                    }
+                    AgentEvent::TaskCompleted { name, tokens_used, .. } => {
+                        emit_ndjson(&NdjsonEvent::TaskCompleted { name: name.clone(), title: String::new(), tokens_used: *tokens_used });
+                    }
+                    AgentEvent::TaskFailed { name, error, .. } => {
+                        emit_ndjson(&NdjsonEvent::TaskFailed { name: name.clone(), title: String::new(), error: error.clone() });
+                    }
+                    _ => {}
+                }
+                // In JSON mode, skip the stderr rendering
+                continue;
+            }
             match event {
                 // ── Team lifecycle ──────────────────────────────────────
                 AgentEvent::TeamSpawned { teammate_count } => {
@@ -1525,6 +1664,62 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
 
+                // ── Subagent progress ────────────────────────────────────
+                AgentEvent::SubAgentProgress {
+                    ref name,
+                    iteration,
+                    max_turns,
+                    ref current_tool,
+                    tokens_so_far,
+                    ..
+                } => {
+                    let c = agent_color(name, &mut color_map, &mut next_color);
+                    let tool_info = current_tool
+                        .as_deref()
+                        .map(|t| format!(" · {}", t))
+                        .unwrap_or_default();
+                    eprint!(
+                        "\r{}   {} {}/{}{} · {}",
+                        name_tag(name, c),
+                        style("◐").fg(c),
+                        iteration + 1,
+                        max_turns,
+                        style(&tool_info).dim(),
+                        style(format!("{} tokens", format_token_count(tokens_so_far))).dim(),
+                    );
+                    let _ = io::stderr().flush();
+                }
+
+                // ── Dynamic task creation ───────────────────────────────
+                AgentEvent::TaskCreated { ref name, ref title, .. } => {
+                    let c = agent_color(name, &mut color_map, &mut next_color);
+                    eprintln!(
+                        "{} {} {}",
+                        name_tag(name, c),
+                        style("+").fg(c),
+                        style(format!("new task: \"{}\"", truncate(title, 60))).dim(),
+                    );
+                }
+
+                // ── Memory compaction ───────────────────────────────────
+                AgentEvent::MemoryCompacted {
+                    ref strategy,
+                    messages_before,
+                    messages_after,
+                    tokens_saved,
+                    ..
+                } => {
+                    eprintln!(
+                        "  {} {} {}→{} messages ({} saved, {})",
+                        style("↻").dim(),
+                        style("compacted:").dim(),
+                        messages_before,
+                        messages_after,
+                        format_token_count(tokens_saved),
+                        style(strategy).dim(),
+                    );
+                }
+
                 // ── Communication ───────────────────────────────────────
                 AgentEvent::TeammateMessage { ref from_name, ref content_preview, .. } => {
                     let c = agent_color(from_name, &mut color_map, &mut next_color);
@@ -1546,19 +1741,29 @@ async fn main() -> anyhow::Result<()> {
         .system
         .unwrap_or_else(|| agent_sdk::prompts::cli_system_prompt(&work_dir));
 
-    // ── Memory auto-loading: inject memory index into system prompt ──
-    if let Ok(paths) = agent_sdk::storage::AgentPaths::for_work_dir(&work_dir) {
+    // ── Paths and memory store (shared by one-shot and REPL) ──
+    let paths = AgentPaths::for_work_dir(&work_dir)?;
+
+    // Create memory store and inject index into system prompt
+    let memory_store: Option<Arc<MemoryStore>> = {
         let memory_dir = paths.project_memory_dir();
-        if let Ok(store) = agent_sdk::MemoryStore::new(memory_dir) {
-            if let Ok(Some(index)) = store.load_index() {
-                system_prompt.push_str(&agent_sdk::prompts::memory_context_section(&index));
+        match MemoryStore::new(memory_dir) {
+            Ok(store) => {
+                if let Ok(Some(index)) = store.load_index() {
+                    system_prompt.push_str(&agent_sdk::prompts::memory_context_section(&index));
+                }
+                Some(Arc::new(store))
             }
+            Err(_) => None,
         }
-    }
+    };
 
     let mut session_path = cli
         .session
         .unwrap_or_else(|| default_session_path(&work_dir));
+
+    // Agent ID for the CLI session
+    let cli_agent_id: AgentId = Uuid::new_v4();
 
     // ── Subagent registry with built-in definitions ──
     let subagent_registry = {
@@ -1610,6 +1815,9 @@ async fn main() -> anyhow::Result<()> {
             cli.json,
             tool_filter,
             &mcp_tools,
+            &paths,
+            memory_store,
+            cli_agent_id,
         )
         .await;
 
@@ -1633,13 +1841,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── Interactive REPL ──
-    // Base tools: read_file, write_file, edit_file, list_directory, glob, grep,
-    // search_files, web_search, run_command, todo_write, update_task_list,
-    // spawn_agent_team, spawn_subagent = 13, plus MCP tools
-    let total_tools = 13 + mcp_tools.len();
-    print_welcome(&model, &work_dir, total_tools);
-
-    let paths = agent_sdk::storage::AgentPaths::for_work_dir(&work_dir)?;
+    // Count tools: 13 built-in + LSP (up to 3) + memory (up to 5) + MCP
+    let tool_count = 13 + mcp_tools.len() + if memory_store.is_some() { 5 } else { 0 };
+    let provider_name = match llm_config.provider {
+        LlmProvider::Claude => "claude",
+        LlmProvider::OpenAi => "openai",
+    };
+    print_welcome(&model, provider_name, &work_dir, tool_count, mcp_tools.len(), None);
     let slash_registry = SlashCommandRegistry::builtin();
 
     let tasks = Arc::new(Mutex::new(Vec::<CliTask>::new()));
@@ -1887,6 +2095,9 @@ async fn main() -> anyhow::Result<()> {
             false,
             plan_filter_refs,
             &mcp_tools,
+            &paths,
+            memory_store.clone(),
+            cli_agent_id,
         )
         .await?;
 
@@ -1937,11 +2148,13 @@ fn print_usage(stats: &TurnStats) {
     let duration = format_duration(stats.duration);
 
     // Compact one-line stats like Claude Code
-    let parts: Vec<String> = vec![
-        format!("{} tokens", format_token_count(stats.tokens)),
-        format!("{} tool {}", stats.tool_calls, if stats.tool_calls == 1 { "use" } else { "uses" }),
-        duration,
-    ];
+    let mut parts: Vec<String> = Vec::new();
+    if stats.iterations > 1 {
+        parts.push(format!("{} iterations", stats.iterations));
+    }
+    parts.push(format!("{} tokens", format_token_count(stats.tokens)));
+    parts.push(format!("{} tool {}", stats.tool_calls, if stats.tool_calls == 1 { "use" } else { "uses" }));
+    parts.push(duration);
 
     eprintln!("  {}", style(parts.join(" · ")).dim());
     eprintln!();
