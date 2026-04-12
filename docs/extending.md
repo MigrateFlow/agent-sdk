@@ -180,6 +180,35 @@ let team = agent_sdk::AgentTeam::new(
 .llm_client(Arc::new(MockClient));
 ```
 
+## MCP Servers
+
+The SDK can load external tools from [Model Context Protocol](https://modelcontextprotocol.io) servers. At startup the CLI reads `.agent/mcp.json` from the working directory, spawns each declared server as a child process, performs the JSON-RPC `initialize` handshake over its stdio, calls `tools/list`, and registers every advertised tool with the agent.
+
+Manifest format:
+
+```json
+{
+  "servers": [
+    {
+      "name": "weather",
+      "command": "npx",
+      "args": ["-y", "@example/weather-mcp"],
+      "env": { "API_KEY": "..." }
+    }
+  ]
+}
+```
+
+Each registered tool is namespaced as `mcp__<server_name>__<tool_name>` to avoid collisions with built-in tools and with tools from other servers. Its JSON Schema is taken verbatim from the server's `inputSchema`. The tool's return value is shaped as:
+
+```json
+{ "content": "<joined text blocks>", "is_error": false }
+```
+
+If a server fails to spawn, handshake, or list tools, it is logged and skipped — other servers continue to load. Servers are kept alive for the duration of the CLI process and killed on exit.
+
+To use MCP programmatically, `agent_sdk::mcp` re-exports `McpClient`, `McpConfig`, `McpServerSpec`, and `StdioTransport`. The transport is generic over `AsyncRead + AsyncWrite`, so tests can drive the client through `tokio::io::duplex` without spawning a real process.
+
 ## Event Consumers
 
 The SDK already emits structured `AgentEvent` values. Build adapters around that stream for:

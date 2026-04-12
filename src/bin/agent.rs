@@ -15,6 +15,8 @@ use agent_sdk::tools::subagent_tools::SpawnSubAgentTool;
 use agent_sdk::tools::team_tools::SpawnAgentTeamTool;
 use agent_sdk::tools::web_tools::WebSearchTool;
 use agent_sdk::tools::mermaid_tools::VerifyMermaidTool;
+use agent_sdk::tools::mcp_tools::McpTool;
+use agent_sdk::mcp::{McpClient, McpConfig, McpServerSpec, StdioTransport};
 use agent_sdk::traits::tool::{Tool, ToolDefinition};
 use agent_sdk::types::chat::ChatMessage;
 use agent_sdk::{AgentEvent, StreamDelta};
@@ -622,6 +624,98 @@ impl Tool for UpdateTaskListTool {
     }
 }
 
+// ─── MCP ─────────────────────────────────────────────────────────────────────
+
+/// Load and initialize all MCP servers declared in `.agent/mcp.json`.
+/// Returns the list of tools to register. Failures for individual servers
+/// are logged and skipped.
+async fn load_mcp_tools(work_dir: &Path, json_mode: bool) -> Vec<Arc<dyn Tool>> {
+    let paths = match agent_sdk::storage::AgentPaths::for_work_dir(work_dir) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    let config_path = paths.project_mcp_config_path();
+
+    let config = match McpConfig::load(&config_path) {
+        Ok(c) => c,
+        // Missing manifest is the common case — no MCP configured.
+        Err(agent_sdk::SdkError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Vec::new();
+        }
+        Err(e) => {
+            if !json_mode {
+                eprintln!(
+                    "  {} failed to read {}: {}",
+                    style("⚠").yellow(),
+                    display_path(&config_path),
+                    e,
+                );
+            }
+            return Vec::new();
+        }
+    };
+
+    let mut all_tools: Vec<Arc<dyn Tool>> = Vec::new();
+    for server in &config.servers {
+        match spawn_and_register_mcp_server(server).await {
+            Ok(tools) => {
+                if !json_mode && !tools.is_empty() {
+                    eprintln!(
+                        "  {} mcp server {} ({} tool{})",
+                        style("✓").green(),
+                        style(&server.name).cyan(),
+                        tools.len(),
+                        if tools.len() == 1 { "" } else { "s" },
+                    );
+                }
+                all_tools.extend(tools);
+            }
+            Err(e) => {
+                if !json_mode {
+                    eprintln!(
+                        "  {} mcp server {} failed: {}",
+                        style("⚠").yellow(),
+                        style(&server.name).cyan(),
+                        e,
+                    );
+                }
+            }
+        }
+    }
+    all_tools
+}
+
+async fn spawn_and_register_mcp_server(
+    server: &McpServerSpec,
+) -> anyhow::Result<Vec<Arc<dyn Tool>>> {
+    let mut cmd = tokio::process::Command::new(&server.command);
+    cmd.args(&server.args)
+        .envs(&server.env)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true);
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to spawn `{}`: {}", server.command, e))?;
+    let transport = StdioTransport::from_child(child)?;
+    let mut client = McpClient::new(transport, server.name.clone());
+    client.initialize().await?;
+    let specs = client.list_tools().await?;
+
+    let client = Arc::new(tokio::sync::Mutex::new(client));
+    let mut tools: Vec<Arc<dyn Tool>> = Vec::with_capacity(specs.len());
+    for spec in specs {
+        tools.push(Arc::new(McpTool {
+            client: client.clone(),
+            spec,
+            server_name: server.name.clone(),
+        }));
+    }
+    Ok(tools)
+}
+
 // ─── Tools & session ─────────────────────────────────────────────────────────
 
 fn build_tools(
@@ -633,6 +727,7 @@ fn build_tools(
     subagent_registry: Arc<agent_sdk::SubAgentRegistry>,
     background_tx: Option<tokio::sync::mpsc::UnboundedSender<agent_sdk::agent::agent_loop::BackgroundResult>>,
     tool_filter: Option<&[String]>,
+    mcp_tools: &[Arc<dyn Tool>],
 ) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
 
@@ -703,6 +798,13 @@ fn build_tools(
 
     if allowed("update_task_list") {
         registry.register(Arc::new(UpdateTaskListTool { tasks }));
+    }
+
+    for tool in mcp_tools {
+        let def = tool.definition();
+        if allowed(&def.name) {
+            registry.register(tool.clone());
+        }
     }
 
     if allowed("verify_mermaid") {
@@ -830,6 +932,7 @@ async fn run_turn(
     subagent_registry: Arc<agent_sdk::SubAgentRegistry>,
     json_mode: bool,
     tool_filter: Option<&[String]>,
+    mcp_tools: &[Arc<dyn Tool>],
 ) -> anyhow::Result<TurnStats> {
     // Create background result channel — tools send completed background results
     // here, and we drain them before each LLM call to inject into conversation.
@@ -845,6 +948,7 @@ async fn run_turn(
         subagent_registry,
         Some(background_tx),
         tool_filter,
+        mcp_tools,
     );
     let tool_defs = tools.definitions();
     let started = Instant::now();
@@ -1597,6 +1701,9 @@ async fn main() -> anyhow::Result<()> {
         ctrlc_handler(interrupt);
     }
 
+    // ── MCP servers ──
+    let mcp_tools: Vec<Arc<dyn Tool>> = load_mcp_tools(&work_dir, cli.json).await;
+
     // ── One-shot mode ──
     let one_shot_prompt = if let Some(ref path) = cli.prompt_file {
         Some(std::fs::read_to_string(path).map_err(|e| {
@@ -1626,6 +1733,7 @@ async fn main() -> anyhow::Result<()> {
             subagent_registry,
             cli.json,
             tool_filter,
+            &mcp_tools,
         )
         .await;
 
@@ -1802,6 +1910,7 @@ async fn main() -> anyhow::Result<()> {
             subagent_registry.clone(),
             false,
             None,
+            &mcp_tools,
         )
         .await?;
 
