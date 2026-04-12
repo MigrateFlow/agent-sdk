@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use console::style;
 
 use crate::compaction::compact_conversation;
-use crate::display::{display_path, format_token_count, print_task_list, truncate};
+use crate::display::{display_path, format_bytes, format_token_count, print_task_list, truncate};
 use crate::session::CliTask;
 use sdk_core::error::{SdkError, SdkResult};
 use sdk_core::storage::AgentPaths;
@@ -76,6 +76,35 @@ impl<'a> CommandContext<'a> {
     }
 }
 
+/// Category for grouping commands in the `/help` display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandCategory {
+    Core,
+    Planning,
+    Session,
+    Cache,
+}
+
+impl CommandCategory {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Core => "Core",
+            Self::Planning => "Planning",
+            Self::Session => "Sessions",
+            Self::Cache => "Cache",
+        }
+    }
+
+    fn all() -> &'static [CommandCategory] {
+        &[
+            CommandCategory::Core,
+            CommandCategory::Planning,
+            CommandCategory::Session,
+            CommandCategory::Cache,
+        ]
+    }
+}
+
 /// Pluggable command trait.
 ///
 /// Implementations must be `Send + Sync` because the registry stores them in
@@ -91,6 +120,11 @@ pub trait SlashCommand: Send + Sync {
     /// Optional aliases (also without leading `/`). Default: empty.
     fn aliases(&self) -> &[&str] {
         &[]
+    }
+
+    /// Category for grouping in `/help`. Default: Core.
+    fn category(&self) -> CommandCategory {
+        CommandCategory::Core
     }
 
     /// Execute the command. `args` is the substring after the command name,
@@ -192,13 +226,9 @@ impl SlashCommandRegistry {
         Err(SdkError::Config(format!("Unknown slash command: /{}", name)))
     }
 
-    /// Render the help text shown by `/help`. The output mirrors the legacy
-    /// hard-coded string: a `Commands` header followed by one line per
-    /// registered command.
+    /// Render the help text shown by `/help`, grouped by category.
     pub fn help_text(&self) -> String {
         let mut out = String::new();
-        out.push('\n');
-        out.push_str(&format!("  {}\n", style("Commands").bold()));
         out.push('\n');
 
         let longest = self
@@ -208,19 +238,30 @@ impl SlashCommandRegistry {
             .max()
             .unwrap_or(0);
 
-        for cmd in &self.commands {
-            let label = format!("/{}", cmd.name());
-            let padded = format!("{:width$}", label, width = longest);
-            out.push_str(&format!(
-                "    {}  {}\n",
-                style(padded).cyan(),
-                cmd.help(),
-            ));
+        for cat in CommandCategory::all() {
+            let cmds_in_cat: Vec<_> = self
+                .commands
+                .iter()
+                .filter(|c| c.category() == *cat)
+                .collect();
+            if cmds_in_cat.is_empty() {
+                continue;
+            }
+
+            out.push_str(&format!("  {}\n\n", style(cat.label()).bold()));
+            for cmd in &cmds_in_cat {
+                let label = format!("/{}", cmd.name());
+                let padded = format!("{:width$}", label, width = longest);
+                out.push_str(&format!(
+                    "    {}  {}\n",
+                    style(padded).cyan(),
+                    cmd.help(),
+                ));
+            }
+            out.push('\n');
         }
 
-        out.push('\n');
-        out.push_str(&format!("  {}\n", style("Tips").bold()));
-        out.push('\n');
+        out.push_str(&format!("  {}\n\n", style("Tips").bold()));
         out.push_str(&format!(
             "    End a line with {} for multi-line input\n",
             style("\\").cyan()
@@ -426,6 +467,40 @@ impl SlashCommand for StatusCommand {
             if *ctx.tool_calls == 1 { "use" } else { "uses" },
             style(ctx.messages.len()).dim(),
         );
+
+        // Show current mode
+        let mode_str = if ctx.ultra_plan.is_some() {
+            let phase = &ctx.ultra_plan.as_ref().unwrap().phase;
+            format!("ultraplan ({})", phase)
+        } else {
+            match ctx.agent_mode {
+                sdk_core::AgentMode::Plan => "plan (read-only)".to_string(),
+                sdk_core::AgentMode::Normal => "normal".to_string(),
+            }
+        };
+        eprintln!(
+            "    {} {}",
+            style("mode:").dim(),
+            if mode_str == "normal" {
+                style(mode_str).dim()
+            } else {
+                style(mode_str).yellow()
+            },
+        );
+
+        // Show cache stats if available
+        if let Some(ref cache) = ctx.cache_state {
+            let stats = cache.file_cache.stats();
+            if stats.entries > 0 {
+                eprintln!(
+                    "    {} {} entries, {}",
+                    style("cache:").dim(),
+                    stats.entries,
+                    style(format_bytes(stats.total_bytes as u64)).dim(),
+                );
+            }
+        }
+
         let current = ctx
             .tasks
             .lock()

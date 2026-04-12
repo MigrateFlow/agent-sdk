@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use console::style;
 
-use crate::commands::{CommandContext, CommandOutcome, SlashCommand};
+use crate::commands::{CommandCategory, CommandContext, CommandOutcome, SlashCommand};
 use crate::display::truncate;
 use crate::session_manager::{SessionManager, SessionStatus};
 use sdk_core::error::SdkResult;
@@ -19,6 +19,10 @@ impl SlashCommand for SessionsCommand {
 
     fn help(&self) -> &str {
         "list all sessions for this project"
+    }
+
+    fn category(&self) -> CommandCategory {
+        CommandCategory::Session
     }
 
     async fn execute(
@@ -104,6 +108,10 @@ impl SlashCommand for ResumeCommand {
         "resume a different session (/resume <id>)"
     }
 
+    fn category(&self) -> CommandCategory {
+        CommandCategory::Session
+    }
+
     async fn execute(
         &self,
         ctx: &mut CommandContext<'_>,
@@ -154,6 +162,10 @@ impl SlashCommand for SessionDescribeCommand {
 
     fn help(&self) -> &str {
         "set description for current session"
+    }
+
+    fn category(&self) -> CommandCategory {
+        CommandCategory::Session
     }
 
     async fn execute(
