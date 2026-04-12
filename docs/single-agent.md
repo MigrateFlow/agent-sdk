@@ -148,6 +148,48 @@ let loop_ = AgentLoop::new(
 
 When the conversation grows too large, the current implementation compacts older assistant and tool-result messages rather than failing immediately.
 
+### Background compaction
+
+Compaction has two paths:
+
+- **Fast path (inline):** truncation-based compression of older tool results
+  and assistant messages. This runs synchronously on the critical path and is
+  used whenever the selected strategy does not warrant LLM summarization.
+- **Summarization path (background):** when the selected strategy is
+  `Aggressive` — or overflow is severe (estimated tokens ≥ `1.8×`
+  `max_context_tokens`) — the loop performs an inline truncation pass AND
+  dispatches a background `tokio::task` that calls `LlmClient::ask(...)` to
+  produce a higher-quality summary of the older conversation window. When the
+  summary arrives (delivered via the same channel that carries
+  `BackgroundResult`s), the loop splices it into history in place of the
+  original window on the next iteration, emitting an
+  `AgentEvent::MemoryCompacted { strategy, messages_before, messages_after, tokens_saved }`
+  event.
+
+Guarantees:
+
+- The expensive summarization never blocks the main LLM call.
+- Only one in-flight summarization task exists at a time; overlapping
+  compaction attempts are skipped.
+- If intervening writes change the target window before the summary lands,
+  the summary is dropped (detected via a stable digest of the window).
+
+Wiring the channel so the loop can dispatch its own summarization:
+
+```rust
+// Option A: let the loop create and own the channel, returning a sender
+// that tools (subagents, teams) can also use:
+let bg_tx = loop_.install_background_channel();
+
+// Option B: use your own channel but also hand the loop a sender clone:
+let (bg_tx, bg_rx) = tokio::sync::mpsc::unbounded_channel();
+loop_.set_background_rx(bg_rx);
+loop_.set_background_tx(bg_tx.clone());
+```
+
+If no sender is installed, the loop falls back to inline truncation only —
+behavior is unchanged.
+
 ## Background Agent Results
 
 When subagents or agent teams run in background mode, their results are delivered back to the parent agent's conversation automatically. Set up the background result channel:

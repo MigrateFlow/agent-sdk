@@ -113,6 +113,14 @@ pub enum AgentEvent {
         feedback: String,
     },
 
+    // --- Memory / compaction ---
+    MemoryCompacted {
+        strategy: String,
+        messages_before: usize,
+        messages_after: usize,
+        tokens_saved: u64,
+    },
+
     // --- Subagent lifecycle ---
     SubAgentSpawned {
         agent_id: AgentId,
@@ -165,6 +173,7 @@ impl AgentEvent {
             | Self::SubAgentFailed { agent_id, .. } => Some(*agent_id),
             Self::TeamSpawned { .. }
             | Self::HookRejected { .. }
+            | Self::MemoryCompacted { .. }
             | Self::Custom { .. } => None,
         }
     }
@@ -193,6 +202,7 @@ impl AgentEvent {
             | Self::SubAgentFailed { name, .. } => Some(name),
             Self::TeamSpawned { .. }
             | Self::HookRejected { .. }
+            | Self::MemoryCompacted { .. }
             | Self::Custom { .. } => None,
         }
     }

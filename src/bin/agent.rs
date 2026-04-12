@@ -968,9 +968,16 @@ async fn run_turn(
         // Drain any completed background agent results and inject them
         // into the conversation so the LLM can reference them.
         while let Ok(result) = background_rx.try_recv() {
-            let kind_label = match result.kind {
+            let kind_label = match &result.kind {
                 agent_sdk::agent::agent_loop::BackgroundResultKind::SubAgent => "subagent",
                 agent_sdk::agent::agent_loop::BackgroundResultKind::AgentTeam => "agent team",
+                // Compaction summaries are only produced by `AgentLoop`'s
+                // own background consolidation path. The CLI runs its own
+                // loop and does not currently dispatch summaries, so if one
+                // somehow lands here we simply ignore it.
+                agent_sdk::agent::agent_loop::BackgroundResultKind::CompactionSummary { .. } => {
+                    continue;
+                }
             };
             let notification = format!(
                 "[Background {} '{}' completed — {} tokens]\n\n{}",
