@@ -12,6 +12,5 @@ pub mod web_tools;
 pub mod context_tools;
 pub mod team_tools;
 pub mod subagent_tools;
-pub mod mermaid_tools;
 pub mod mcp_tools;
 pub mod lsp_tools;

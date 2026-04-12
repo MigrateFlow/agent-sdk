@@ -6,7 +6,23 @@ use serde_json::json;
 use crate::error::{SdkError, SdkResult};
 use crate::traits::tool::{Tool, ToolDefinition};
 
-const DEFAULT_MAX_LINES: usize = 500;
+const DEFAULT_MAX_LINES: usize = 2000;
+
+/// Known binary / image extensions that should not be read as text.
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "svg", "tiff", "tif",
+];
+
+const BINARY_EXTENSIONS: &[&str] = &[
+    "exe", "dll", "so", "dylib", "o", "a", "lib", "bin", "class", "jar",
+    "war", "ear", "pyc", "pyo", "wasm", "deb", "rpm", "dmg", "iso",
+    "zip", "gz", "bz2", "xz", "tar", "7z", "rar",
+    "mp3", "mp4", "avi", "mov", "mkv", "flv", "wav", "ogg", "flac",
+    "ttf", "otf", "woff", "woff2", "eot",
+    "sqlite", "db",
+];
+
+const PDF_EXTENSION: &str = "pdf";
 
 /// Read a file as a String, auto-detecting encoding.
 /// Tries UTF-8 first; falls back to Shift-JIS if the bytes are not valid UTF-8
@@ -30,6 +46,19 @@ pub async fn read_file_auto_encoding(path: &std::path::Path) -> std::io::Result<
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// Check if a file is likely binary by examining the first 512 bytes for null bytes.
+fn is_binary_content(bytes: &[u8]) -> bool {
+    let check_len = bytes.len().min(512);
+    bytes[..check_len].contains(&0)
+}
+
+/// Get the file extension in lowercase.
+fn file_extension(path: &std::path::Path) -> Option<String> {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+}
+
 pub struct ReadFileTool {
     pub source_root: PathBuf,
     pub work_dir: PathBuf,
@@ -40,13 +69,30 @@ impl Tool for ReadFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "read_file".to_string(),
-            description: "Read the contents of a file. The path is relative to the repository root. For large files, use offset/max_lines to read in chunks.".to_string(),
+            description: "Read a file's contents. Returns lines with line numbers (cat -n \
+                          format). For large files, use offset/limit to read specific ranges. \
+                          Detects binary files, images, and PDFs — returns metadata instead \
+                          of raw bytes for those."
+                .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Relative path to the file" },
-                    "offset": { "type": "integer", "description": "Line number to start reading from (0-based, default: 0)" },
-                    "max_lines": { "type": "integer", "description": "Maximum number of lines to return (default: 500)" }
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path to the file"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Line number to start reading from (1-based, default: 1)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of lines to return (default: 2000)"
+                    },
+                    "max_lines": {
+                        "type": "integer",
+                        "description": "Alias for limit (deprecated, use limit instead)"
+                    }
                 },
                 "required": ["path"]
             }),
@@ -61,8 +107,15 @@ impl Tool for ReadFileTool {
                 message: "Missing 'path' argument".to_string(),
             })?;
 
-        let offset = arguments["offset"].as_u64().unwrap_or(0) as usize;
-        let max_lines = arguments["max_lines"].as_u64().unwrap_or(DEFAULT_MAX_LINES as u64) as usize;
+        // Support both 'limit' (new) and 'max_lines' (legacy)
+        let limit = arguments["limit"]
+            .as_u64()
+            .or_else(|| arguments["max_lines"].as_u64())
+            .unwrap_or(DEFAULT_MAX_LINES as u64) as usize;
+
+        // Offset is now 1-based (0 also accepted for backward compat)
+        let raw_offset = arguments["offset"].as_u64().unwrap_or(0) as usize;
+        let offset = if raw_offset > 0 { raw_offset - 1 } else { 0 };
 
         let full_path = self.source_root.join(path);
         let full_path = if full_path.exists() {
@@ -81,44 +134,129 @@ impl Tool for ReadFileTool {
             message: format!("Cannot resolve path: {}", e),
         })?;
 
-        let source_canonical = self.source_root.canonicalize().unwrap_or_else(|_| self.source_root.clone());
-        let work_canonical = self.work_dir.canonicalize().unwrap_or_else(|_| self.work_dir.clone());
+        let source_canonical = self
+            .source_root
+            .canonicalize()
+            .unwrap_or_else(|_| self.source_root.clone());
+        let work_canonical = self
+            .work_dir
+            .canonicalize()
+            .unwrap_or_else(|_| self.work_dir.clone());
 
         if !canonical.starts_with(&source_canonical) && !canonical.starts_with(&work_canonical) {
             return Ok(json!({ "error": "Path escapes allowed directories" }));
         }
 
-        match read_file_auto_encoding(&canonical).await {
-            Ok(content) => {
-                let all_lines: Vec<&str> = content.lines().collect();
-                let total_lines = all_lines.len();
-                let start = offset.min(total_lines);
-                let end = (start + max_lines).min(total_lines);
-                let slice = &all_lines[start..end];
-                let truncated = end < total_lines;
-                let result_content = slice.join("\n");
+        // Check file extension for special types
+        let ext = file_extension(&canonical);
 
-                let mut result = json!({
-                    "content": result_content,
-                    "lines": total_lines,
+        // Handle image files
+        if let Some(ref e) = ext {
+            if IMAGE_EXTENSIONS.contains(&e.as_str()) {
+                let meta = tokio::fs::metadata(&canonical).await.ok();
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                return Ok(json!({
                     "path": path,
-                    "offset": start,
-                    "lines_returned": slice.len(),
-                });
-
-                if truncated {
-                    result["truncated"] = json!(true);
-                    result["next_offset"] = json!(end);
-                    result["note"] = json!(format!(
-                        "File has {} lines, showing lines {}-{}. Use offset={} to read more.",
-                        total_lines, start + 1, end, end
-                    ));
-                }
-
-                Ok(result)
+                    "type": "image",
+                    "format": e,
+                    "size_bytes": size,
+                    "note": "This is an image file. Content cannot be displayed as text."
+                }));
             }
-            Err(e) => Ok(json!({ "error": format!("Failed to read file: {}", e) })),
         }
+
+        // Handle PDF files
+        if ext.as_deref() == Some(PDF_EXTENSION) {
+            let meta = tokio::fs::metadata(&canonical).await.ok();
+            let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+            return Ok(json!({
+                "path": path,
+                "type": "pdf",
+                "size_bytes": size,
+                "note": "This is a PDF file. Use an external tool to extract text content."
+            }));
+        }
+
+        // Handle known binary extensions
+        if let Some(ref e) = ext {
+            if BINARY_EXTENSIONS.contains(&e.as_str()) {
+                let meta = tokio::fs::metadata(&canonical).await.ok();
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                return Ok(json!({
+                    "path": path,
+                    "type": "binary",
+                    "format": e,
+                    "size_bytes": size,
+                    "note": "This is a binary file. Content cannot be displayed as text."
+                }));
+            }
+        }
+
+        // Read file bytes and check for binary content
+        let bytes = match tokio::fs::read(&canonical).await {
+            Ok(b) => b,
+            Err(e) => return Ok(json!({ "error": format!("Failed to read file: {}", e) })),
+        };
+
+        if is_binary_content(&bytes) {
+            return Ok(json!({
+                "path": path,
+                "type": "binary",
+                "size_bytes": bytes.len(),
+                "note": "This file contains binary content and cannot be displayed as text."
+            }));
+        }
+
+        // Decode text content
+        let content = match String::from_utf8(bytes.clone()) {
+            Ok(s) => s,
+            Err(_) => {
+                // Try Shift-JIS
+                let (cow, _encoding, had_errors) = encoding_rs::SHIFT_JIS.decode(&bytes);
+                if !had_errors {
+                    cow.into_owned()
+                } else {
+                    String::from_utf8_lossy(&bytes).into_owned()
+                }
+            }
+        };
+
+        let all_lines: Vec<&str> = content.lines().collect();
+        let total_lines = all_lines.len();
+        let start = offset.min(total_lines);
+        let end = (start + limit).min(total_lines);
+        let slice = &all_lines[start..end];
+        let truncated = end < total_lines;
+
+        // Format with line numbers (cat -n style): "line_number\tcontent"
+        let numbered_lines: Vec<String> = slice
+            .iter()
+            .enumerate()
+            .map(|(i, line)| format!("{}\t{}", start + i + 1, line))
+            .collect();
+        let result_content = numbered_lines.join("\n");
+
+        let mut result = json!({
+            "content": result_content,
+            "lines": total_lines,
+            "path": path,
+            "offset": start + 1,
+            "lines_returned": slice.len(),
+        });
+
+        if truncated {
+            result["truncated"] = json!(true);
+            result["next_offset"] = json!(end + 1);
+            result["note"] = json!(format!(
+                "File has {} lines, showing lines {}-{}. Use offset={} to read more.",
+                total_lines,
+                start + 1,
+                end,
+                end + 1
+            ));
+        }
+
+        Ok(result)
     }
 }
 
@@ -161,16 +299,20 @@ impl Tool for WriteFileTool {
         let full_path = self.work_dir.join(path);
 
         if let Some(parent) = full_path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| SdkError::ToolExecution {
-                tool_name: "write_file".to_string(),
-                message: format!("Failed to create directories: {}", e),
-            })?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| SdkError::ToolExecution {
+                    tool_name: "write_file".to_string(),
+                    message: format!("Failed to create directories: {}", e),
+                })?;
         }
 
-        tokio::fs::write(&full_path, content).await.map_err(|e| SdkError::ToolExecution {
-            tool_name: "write_file".to_string(),
-            message: format!("Failed to write file: {}", e),
-        })?;
+        tokio::fs::write(&full_path, content)
+            .await
+            .map_err(|e| SdkError::ToolExecution {
+                tool_name: "write_file".to_string(),
+                message: format!("Failed to write file: {}", e),
+            })?;
 
         let lines = content.lines().count();
         Ok(json!({
@@ -211,10 +353,12 @@ impl Tool for ListDirectoryTool {
         }
 
         let mut entries = Vec::new();
-        let mut dir = tokio::fs::read_dir(&full_path).await.map_err(|e| SdkError::ToolExecution {
-            tool_name: "list_directory".to_string(),
-            message: format!("Failed to read directory: {}", e),
-        })?;
+        let mut dir = tokio::fs::read_dir(&full_path)
+            .await
+            .map_err(|e| SdkError::ToolExecution {
+                tool_name: "list_directory".to_string(),
+                message: format!("Failed to read directory: {}", e),
+            })?;
 
         while let Some(entry) = dir.next_entry().await.map_err(|e| SdkError::ToolExecution {
             tool_name: "list_directory".to_string(),
@@ -222,7 +366,11 @@ impl Tool for ListDirectoryTool {
         })? {
             let name = entry.file_name().to_string_lossy().to_string();
             let ft = entry.file_type().await.ok();
-            let kind = if ft.as_ref().is_some_and(|f| f.is_dir()) { "directory" } else { "file" };
+            let kind = if ft.as_ref().is_some_and(|f| f.is_dir()) {
+                "directory"
+            } else {
+                "file"
+            };
             entries.push(json!({ "name": name, "type": kind }));
         }
 

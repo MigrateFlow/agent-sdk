@@ -11,7 +11,6 @@ use agent_sdk::tools::builder::{
     CommandToolPolicy, DefaultToolsetBuilder, SubAgentToolConfig, TeamToolConfig, ToolFilter,
 };
 use agent_sdk::tools::registry::ToolRegistry;
-use agent_sdk::tools::mermaid_tools::VerifyMermaidTool;
 use agent_sdk::tools::mcp_tools::McpTool;
 use agent_sdk::mcp::{McpClient, McpConfig, McpServerSpec, StdioTransport};
 use agent_sdk::traits::tool::{Tool, ToolDefinition};
@@ -701,29 +700,11 @@ fn build_tools(
 
     builder = builder.add_custom_tool(Arc::new(UpdateTaskListTool { tasks }));
 
-    if let Some(mermaid_tool) = build_verify_mermaid_tool(work_dir) {
-        builder = builder.add_custom_tool(Arc::new(mermaid_tool));
-    }
-
     for tool in mcp_tools {
         builder = builder.add_custom_tool(tool.clone());
     }
 
     builder.build()
-}
-
-fn build_verify_mermaid_tool(work_dir: &Path) -> Option<VerifyMermaidTool> {
-    let script_path = std::env::var("VERIFY_MERMAID_SCRIPT")
-        .ok()
-        .map(PathBuf::from)?;
-    let node_work_dir = std::env::var("VERIFY_MERMAID_WORK_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| work_dir.to_path_buf());
-
-    Some(VerifyMermaidTool {
-        script_path,
-        work_dir: node_work_dir,
-    })
 }
 
 // ─── Input ───────────────────────────────────────────────────────────────────
