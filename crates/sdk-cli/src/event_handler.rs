@@ -7,17 +7,9 @@ use tokio::sync::mpsc;
 
 use sdk_core::events::AgentEvent;
 
-use crate::display::{floor_char_boundary, format_token_count, truncate};
+use crate::agent_dashboard::AgentDashboard;
+use crate::display::{floor_char_boundary, format_token_count, truncate, AGENT_COLORS};
 use crate::ndjson::{emit_ndjson, NdjsonEvent};
-
-const COLORS: &[console::Color] = &[
-    console::Color::Magenta,
-    console::Color::Blue,
-    console::Color::Yellow,
-    console::Color::Green,
-    console::Color::Cyan,
-    console::Color::Red,
-];
 
 /// Stateful event renderer that tracks agent colors, start times, and active agents.
 struct EventRenderer {
@@ -25,6 +17,7 @@ struct EventRenderer {
     next_color: usize,
     start_times: HashMap<String, Instant>,
     active_agents: HashSet<String>,
+    dashboard: AgentDashboard,
 }
 
 impl EventRenderer {
@@ -34,12 +27,18 @@ impl EventRenderer {
             next_color: 0,
             start_times: HashMap::new(),
             active_agents: HashSet::new(),
+            dashboard: AgentDashboard::new(),
         }
+    }
+
+    /// Whether to use the dashboard table (2+ subagents tracked).
+    fn use_dashboard(&self) -> bool {
+        self.dashboard.agent_count() >= 2
     }
 
     fn agent_color(&mut self, name: &str) -> console::Color {
         *self.color_map.entry(name.to_string()).or_insert_with(|| {
-            let c = COLORS[self.next_color % COLORS.len()];
+            let c = AGENT_COLORS[self.next_color % AGENT_COLORS.len()];
             self.next_color += 1;
             c
         })
@@ -152,64 +151,88 @@ impl EventRenderer {
             AgentEvent::SubAgentSpawned { ref name, ref description, .. } => {
                 self.active_agents.insert(name.clone());
                 self.start_times.insert(name.clone(), Instant::now());
-                let c = self.agent_color(name);
-                let desc = if description.is_empty() {
-                    String::new()
+                self.dashboard.add_agent(name, description);
+
+                if self.use_dashboard() {
+                    self.dashboard.render();
                 } else {
-                    format!(" — {}", truncate(description, 60))
-                };
-                eprint!("\r\x1b[K");
-                let _ = io::stderr().flush();
-                eprintln!(
-                    "  {} {} {}{}",
-                    style("⎿").cyan(),
-                    style("Subagent").bold(),
-                    style(name).fg(c).bold(),
-                    style(desc).dim(),
-                );
+                    let c = self.agent_color(name);
+                    let desc = if description.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" — {}", truncate(description, 60))
+                    };
+                    eprint!("\r\x1b[K");
+                    let _ = io::stderr().flush();
+                    eprintln!(
+                        "  {} {} {}{}",
+                        style("⎿").cyan(),
+                        style("Subagent").bold(),
+                        style(name).fg(c).bold(),
+                        style(desc).dim(),
+                    );
+                }
             }
 
             // Single in-place progress line (overwrites itself -- no new lines)
             AgentEvent::SubAgentProgress { ref name, iteration, max_turns, ref current_tool, tokens_so_far, .. } => {
-                let c = self.agent_color(name);
-                let display = if name.len() > 16 { &name[..floor_char_boundary(name, 16)] } else { name.as_str() };
-                let tool_info = current_tool.as_deref().map(|t| format!(" · {}", t)).unwrap_or_default();
-                eprint!(
-                    "\r\x1b[K  {} {} {} {}/{}{}  ↓{}",
-                    style("│").fg(c),
-                    style(format!("{:<16}", display)).fg(c).bold(),
-                    style("◐").fg(c),
-                    iteration + 1,
-                    max_turns,
-                    style(&tool_info).dim(),
-                    style(format_token_count(tokens_so_far)).dim(),
-                );
-                let _ = io::stderr().flush();
+                self.dashboard.update_progress(name, iteration, max_turns, current_tool.as_deref(), tokens_so_far);
+
+                if self.use_dashboard() {
+                    self.dashboard.render();
+                } else {
+                    let c = self.agent_color(name);
+                    let display = if name.len() > 16 { &name[..floor_char_boundary(name, 16)] } else { name.as_str() };
+                    let tool_info = current_tool.as_deref().map(|t| format!(" · {}", t)).unwrap_or_default();
+                    eprint!(
+                        "\r\x1b[K  {} {} {} {}/{}{}  ↓{}",
+                        style("│").fg(c),
+                        style(format!("{:<16}", display)).fg(c).bold(),
+                        style("◐").fg(c),
+                        iteration + 1,
+                        max_turns,
+                        style(&tool_info).dim(),
+                        style(format_token_count(tokens_so_far)).dim(),
+                    );
+                    let _ = io::stderr().flush();
+                }
             }
 
             AgentEvent::SubAgentCompleted { ref name, tokens_used, tool_calls, .. } => {
                 self.active_agents.remove(name);
-                let elapsed = self.elapsed_str(name);
-                eprint!("\r\x1b[K");
-                let _ = io::stderr().flush();
-                let tag = self.name_tag(name);
-                eprintln!(
-                    "{} {} ↓{} · {} tool {}{}",
-                    tag,
-                    style("✓").green(),
-                    style(format_token_count(tokens_used)).dim(),
-                    tool_calls,
-                    if tool_calls == 1 { "use" } else { "uses" },
-                    style(&elapsed).dim(),
-                );
+                self.dashboard.mark_completed(name, tokens_used, tool_calls);
+
+                if self.use_dashboard() {
+                    self.dashboard.render();
+                } else {
+                    let elapsed = self.elapsed_str(name);
+                    eprint!("\r\x1b[K");
+                    let _ = io::stderr().flush();
+                    let tag = self.name_tag(name);
+                    eprintln!(
+                        "{} {} ↓{} · {} tool {}{}",
+                        tag,
+                        style("✓").green(),
+                        style(format_token_count(tokens_used)).dim(),
+                        tool_calls,
+                        if tool_calls == 1 { "use" } else { "uses" },
+                        style(&elapsed).dim(),
+                    );
+                }
                 // No final_content preview -- too spammy
             }
             AgentEvent::SubAgentFailed { ref name, ref error, .. } => {
                 self.active_agents.remove(name);
-                eprint!("\r\x1b[K");
-                let _ = io::stderr().flush();
-                let tag = self.name_tag(name);
-                eprintln!("{} {} {}", tag, style("✗").red(), style(truncate(error, 80)).red());
+                self.dashboard.mark_failed(name, error);
+
+                if self.use_dashboard() {
+                    self.dashboard.render();
+                } else {
+                    eprint!("\r\x1b[K");
+                    let _ = io::stderr().flush();
+                    let tag = self.name_tag(name);
+                    eprintln!("{} {} {}", tag, style("✗").red(), style(truncate(error, 80)).red());
+                }
             }
             AgentEvent::SubAgentUpdate { .. } => {
                 // silent -- progress line is enough

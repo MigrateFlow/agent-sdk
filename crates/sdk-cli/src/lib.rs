@@ -1,3 +1,4 @@
+pub mod agent_dashboard;
 pub mod cache_commands;
 pub mod ui;
 pub mod commands;
