@@ -23,6 +23,7 @@ pub use agent::team_lead::{TeamLead, ExecutionSummary, TeammateSpec};
 pub use agent::teammate::Teammate;
 pub use agent::events::AgentEvent;
 pub use agent::memory::MemoryStore;
+pub use types::memory::{MemoryEntry, MemoryType};
 pub use agent::hooks::{Hook, HookEvent, HookResult, HookRegistry};
 pub use agent::cost::{CostRecord, CostTracker};
 pub use task::store::TaskStore;

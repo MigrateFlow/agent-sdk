@@ -215,6 +215,22 @@ fn format_tool_label(tool_name: &str, arguments: &str) -> String {
                 format!("{} {}", style("Spawn Subagent").bold(), style(name).cyan().bold())
             }
         }
+        "edit_file" => {
+            let path = arg_str(&args, "path").unwrap_or("?");
+            format!("{} {}", style("Edit").bold(), style(path).cyan())
+        }
+        "glob" => {
+            let pattern = arg_str(&args, "pattern").unwrap_or("?");
+            format!("{} {}", style("Glob").bold(), style(pattern).cyan())
+        }
+        "grep" => {
+            let pattern = arg_str(&args, "pattern").unwrap_or("?");
+            let mode = arg_str(&args, "output_mode").unwrap_or("files_with_matches");
+            format!("{} {} ({})", style("Grep").bold(), style(format!("\"{}\"", pattern)).white(), mode)
+        }
+        "todo_write" => {
+            format!("{}", style("Todo").bold())
+        }
         "update_task_list" => {
             format!("{}", style("Update Task List").bold())
         }
@@ -305,6 +321,33 @@ fn format_result_preview(tool_name: &str, result: &str) -> String {
                     tool_calls
                 )
             }
+        }
+        "edit_file" => {
+            let replacements = val["replacements_made"].as_u64().unwrap_or(0);
+            format!("{} replacement(s)", replacements)
+        }
+        "glob" => {
+            let shown = val["shown"].as_u64().unwrap_or(0);
+            let total = val["total_matches"].as_u64().unwrap_or(0);
+            if shown < total {
+                format!("{} files (showing {})", total, shown)
+            } else {
+                format!("{} files", total)
+            }
+        }
+        "grep" => {
+            if let Some(n) = val["files_with_matches"].as_u64().or(val["total_matches"].as_u64()) {
+                format!("{} files", n)
+            } else if let Some(n) = val["total_shown"].as_u64() {
+                format!("{} matches", n)
+            } else {
+                "done".to_string()
+            }
+        }
+        "todo_write" => {
+            let count = val["count"].as_u64().unwrap_or(0);
+            let completed = val["completed"].as_u64().unwrap_or(0);
+            format!("{}/{} completed", completed, count)
         }
         "update_task_list" => {
             let count = val["count"].as_u64().unwrap_or(0);
@@ -1403,9 +1446,19 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // ── System prompt ──
-    let system_prompt = cli
+    let mut system_prompt = cli
         .system
         .unwrap_or_else(|| agent_sdk::prompts::cli_system_prompt(&work_dir));
+
+    // ── Memory auto-loading: inject memory index into system prompt ──
+    if let Ok(paths) = agent_sdk::storage::AgentPaths::for_work_dir(&work_dir) {
+        let memory_dir = paths.project_memory_dir();
+        if let Ok(store) = agent_sdk::MemoryStore::new(memory_dir) {
+            if let Ok(Some(index)) = store.load_index() {
+                system_prompt.push_str(&agent_sdk::prompts::memory_context_section(&index));
+            }
+        }
+    }
 
     let session_path = cli
         .session

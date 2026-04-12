@@ -19,10 +19,14 @@ pub fn cli_system_prompt(work_dir: &Path) -> String {
 You have these tools. Use them proactively — don't ask for permission.
 - `read_file` — Read file contents (use offset/max_lines for large files)
 - `write_file` — Write or create files
+- `edit_file` — Surgical text replacement in files (old_string → new_string). Much more efficient than rewriting entire files
 - `list_directory` — List directory contents
-- `search_files` — Search by glob pattern and/or content
+- `glob` — Fast file pattern matching (e.g., `**/*.rs`), sorted by modification time
+- `grep` — Search file contents with regex, context lines, and output modes (content/files_with_matches/count)
+- `search_files` — Search by glob pattern and/or content (combines glob + grep in one tool)
 - `web_search` — Search the public web for current information
 - `run_command` — Execute shell commands
+- `todo_write` — Track progress on multi-step work with a task list
 - `update_task_list` — Update the visible Task list for multi-step work
 - `spawn_agent_team` — Spawn parallel agents for complex, multi-part tasks
 - `spawn_subagent` — Spawn a focused subagent in its own context window
@@ -91,7 +95,7 @@ pub fn teammate_system_prompt(
 - `search_files` — Search for file patterns and content
 - `web_search` — Search the public web for current information
 - `run_command` — Run shell commands in output directory
-- `read_memory` / `write_memory` / `list_memory` — Shared team context
+- `read_memory` / `write_memory` / `list_memory` / `search_memory` / `delete_memory` — Persistent memory (survives across sessions)
 - `get_task_context` / `list_completed_tasks` — See what other agents did
 
 ## Your Task
@@ -226,5 +230,18 @@ pub fn teammate_user_message(task: &Task) -> String {
         assigned,
         task.dependencies,
         serde_json::to_string_pretty(&task.context).unwrap_or_default()
+    )
+}
+
+/// Generate a system prompt section that injects the memory index.
+/// Append this to the system prompt when memories exist.
+pub fn memory_context_section(index_content: &str) -> String {
+    format!(
+        "\n\n# Project Memory\n\
+         The following memories are available from previous sessions:\n\n\
+         {index_content}\n\n\
+         Use `read_memory` to access full content. Use `write_memory` to persist \
+         important findings. Use `search_memory` to find relevant memories by type \
+         or keyword. Use `delete_memory` to remove outdated entries.",
     )
 }

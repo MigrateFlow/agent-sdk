@@ -132,12 +132,17 @@ The CLI supports both REPL and one-shot modes. Relevant facts:
 - Built-in CLI tools are:
   - `read_file`
   - `write_file`
+  - `edit_file` — surgical string replacement (old_string → new_string)
   - `list_directory`
+  - `glob` — fast file pattern matching, mtime-sorted
+  - `grep` — content search with context lines and output modes
   - `search_files`
   - `web_search`
   - `run_command`
+  - `todo_write` — ephemeral task tracking within conversations
   - `update_task_list`
   - `spawn_agent_team`
+  - Memory tools (team mode): `read_memory`, `write_memory`, `list_memory`, `search_memory`, `delete_memory`
 
 If you change tool names, schemas, or output shapes, inspect the CLI formatting helpers in `src/bin/agent.rs`.
 

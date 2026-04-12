@@ -15,15 +15,21 @@ use crate::traits::tool::Tool;
 
 use super::command_tools::RunCommandTool;
 use super::context_tools::{GetTaskContextTool, ListCompletedTasksTool};
+use super::edit_tools::EditFileTool;
 use super::fs_tools::{ListDirectoryTool, ReadFileTool, WriteFileTool};
+use super::glob_tools::GlobTool;
+use super::grep_tools::GrepTool;
 use super::lsp_tools::{
     LspDocumentSymbolsTool, LspFindReferencesTool, LspGotoDefinitionTool, SharedLspManager,
 };
-use super::memory_tools::{ListMemoryTool, ReadMemoryTool, WriteMemoryTool};
+use super::memory_tools::{
+    DeleteMemoryTool, ListMemoryTool, ReadMemoryTool, SearchMemoryTool, WriteMemoryTool,
+};
 use super::registry::ToolRegistry;
 use super::search_tools::SearchFilesTool;
 use super::subagent_tools::SpawnSubAgentTool;
 use super::team_tools::SpawnAgentTeamTool;
+use super::todo_tools::TodoWriteTool;
 use super::web_tools::WebSearchTool;
 use crate::lsp::{work_dir_to_root_uri, LspConfig, LspManager};
 use tokio::sync::Mutex;
@@ -134,6 +140,16 @@ impl DefaultToolsetBuilder {
             source_root: source_root.clone(),
             work_dir: work_dir.clone(),
         });
+        self.register(EditFileTool {
+            source_root: source_root.clone(),
+            work_dir: work_dir.clone(),
+        });
+        self.register(GlobTool {
+            source_root: source_root.clone(),
+        });
+        self.register(GrepTool {
+            source_root: source_root.clone(),
+        });
         self.register(SearchFilesTool { source_root });
         self.register(WebSearchTool);
 
@@ -161,7 +177,13 @@ impl DefaultToolsetBuilder {
             memory_store: memory_store.clone(),
             agent_id,
         });
-        self.register(ListMemoryTool { memory_store });
+        self.register(ListMemoryTool {
+            memory_store: memory_store.clone(),
+        });
+        self.register(SearchMemoryTool {
+            memory_store: memory_store.clone(),
+        });
+        self.register(DeleteMemoryTool { memory_store });
         self
     }
 
@@ -193,6 +215,11 @@ impl DefaultToolsetBuilder {
             registry: config.registry,
             background_tx: config.background_tx,
         });
+        self
+    }
+
+    pub fn add_todo_tool(mut self, items: Arc<Mutex<Vec<super::todo_tools::TodoItem>>>) -> Self {
+        self.register(TodoWriteTool { items });
         self
     }
 

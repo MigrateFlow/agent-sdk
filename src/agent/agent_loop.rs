@@ -64,6 +64,11 @@ const SUMMARIZER_SYSTEM: &str =
 /// configured strategy is not explicitly aggressive.
 const SUMMARIZATION_OVERFLOW_RATIO: f64 = 1.8;
 
+/// Proactive compaction triggers at this fraction of max_context_tokens,
+/// before the context actually overflows. Uses a gentle Conservative
+/// profile to avoid degrading quality.
+const PROACTIVE_COMPACTION_RATIO: f64 = 0.80;
+
 #[derive(Debug)]
 pub struct AgentLoopResult {
     pub final_content: String,
@@ -514,7 +519,26 @@ impl AgentLoop {
 
     fn compact_if_needed(&mut self) {
         let size = self.estimate_context_tokens();
-        if size <= self.max_context_tokens {
+        let proactive_threshold =
+            (self.max_context_tokens as f64 * PROACTIVE_COMPACTION_RATIO) as usize;
+
+        if size <= proactive_threshold {
+            return;
+        }
+
+        let is_proactive = size <= self.max_context_tokens;
+
+        // Proactive compaction: gently trim before overflow
+        if is_proactive {
+            debug!(
+                agent_id = %self.agent_id,
+                estimated_tokens = size,
+                threshold = proactive_threshold,
+                messages = self.messages.len(),
+                "Proactive compaction triggered at {}% capacity",
+                (size * 100) / self.max_context_tokens.max(1)
+            );
+            self.compact_with_profile(CompactionProfile::CONSERVATIVE);
             return;
         }
 
@@ -786,17 +810,24 @@ impl AgentLoop {
 
         let keep_after = total - profile.keep_recent;
 
-        for i in 1..keep_after {
+        // Score messages by importance and sort candidates so we compact
+        // lowest-importance messages first (large tool results before errors,
+        // errors before user messages).
+        let mut candidates: Vec<(usize, MessageImportance)> = (1..keep_after)
+            .map(|i| (i, score_message(&self.messages[i])))
+            .collect();
+        candidates.sort_by_key(|&(_, imp)| imp);
+
+        for (i, _importance) in candidates {
             match &self.messages[i] {
                 ChatMessage::Tool {
                     tool_call_id,
                     content,
                 } => {
                     if content.len() > profile.tool_result_chars_limit {
-                        let summary = format!(
-                            "[compacted: {} chars] {}",
-                            content.len(),
-                            safe_prefix(content, profile.tool_result_chars_limit.saturating_sub(50))
+                        let summary = smart_truncate_tool_result(
+                            content,
+                            profile.tool_result_chars_limit,
                         );
                         self.messages[i] = ChatMessage::Tool {
                             tool_call_id: tool_call_id.clone(),
@@ -1052,6 +1083,96 @@ fn build_result_preview(val: &serde_json::Value) -> String {
     }
 
     serde_json::to_string(&serde_json::Value::Object(preview)).unwrap_or_default()
+}
+
+/// Score a message by importance for compaction ordering.
+/// Lower scores are compacted first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MessageImportance {
+    /// Large successful tool results — compact first
+    LargeToolResult = 0,
+    /// Small tool results
+    SmallToolResult = 1,
+    /// Assistant reasoning
+    AssistantContent = 2,
+    /// Tool results containing errors — preserve longer
+    ToolResultWithError = 3,
+    /// User instructions — preserve as long as possible
+    UserMessage = 4,
+    /// System prompt — never compact
+    SystemMessage = 5,
+}
+
+fn score_message(msg: &ChatMessage) -> MessageImportance {
+    match msg {
+        ChatMessage::System { .. } => MessageImportance::SystemMessage,
+        ChatMessage::User { .. } => MessageImportance::UserMessage,
+        ChatMessage::Assistant { .. } => MessageImportance::AssistantContent,
+        ChatMessage::Tool { content, .. } => {
+            let has_error = content.contains("\"error\"")
+                || content.contains("\"error\":")
+                || content.contains("Error:")
+                || content.contains("error\":");
+            if has_error {
+                MessageImportance::ToolResultWithError
+            } else if content.len() > 2000 {
+                MessageImportance::LargeToolResult
+            } else {
+                MessageImportance::SmallToolResult
+            }
+        }
+    }
+}
+
+/// Structure-aware tool result truncation for compaction.
+/// Preserves error, path, and metadata fields from JSON results.
+fn smart_truncate_tool_result(content: &str, limit: usize) -> String {
+    if content.len() <= limit {
+        return content.to_string();
+    }
+
+    // Try to parse as JSON and preserve important fields
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(content) {
+        // Always preserve error fields
+        if let Some(err) = val.get("error") {
+            let err_str = serde_json::to_string(err).unwrap_or_default();
+            if err_str.len() < limit {
+                return format!(
+                    "{{\"error\": {}, \"_compacted_from\": {} }}",
+                    err_str,
+                    content.len()
+                );
+            }
+        }
+
+        // Preserve structural metadata
+        let preserve_keys = ["path", "file", "files", "count", "total_matches",
+                             "lines", "exit_code", "status", "name"];
+        let mut preserved = serde_json::Map::new();
+        for key in &preserve_keys {
+            if let Some(v) = val.get(*key) {
+                preserved.insert(key.to_string(), v.clone());
+            }
+        }
+        if !preserved.is_empty() {
+            preserved.insert(
+                "_compacted_from".to_string(),
+                serde_json::Value::Number(content.len().into()),
+            );
+            let result = serde_json::to_string(&serde_json::Value::Object(preserved))
+                .unwrap_or_default();
+            if result.len() < limit {
+                return result;
+            }
+        }
+    }
+
+    // Fallback: prefix truncation
+    format!(
+        "[compacted: {} chars] {}",
+        content.len(),
+        safe_prefix(content, limit.saturating_sub(50))
+    )
 }
 
 fn truncate_tool_result(s: &str) -> String {
