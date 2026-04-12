@@ -94,6 +94,9 @@ pub enum MessageKind {
 pub struct TaskCompletePayload {
     pub task_id: TaskId,
     pub tokens_used: u64,
+    /// Optional summary of the work done, delivered to the parent agent.
+    #[serde(default)]
+    pub result_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,6 +187,7 @@ mod tests {
         let p = TaskCompletePayload {
             task_id: Uuid::new_v4(),
             tokens_used: 123,
+            result_summary: Some("done".into()),
         };
         let back: TaskCompletePayload =
             serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();

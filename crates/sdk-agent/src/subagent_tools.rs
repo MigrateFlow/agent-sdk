@@ -122,7 +122,7 @@ impl Tool for SpawnSubAgentTool {
                     },
                     "max_turns": {
                         "type": "integer",
-                        "description": "Maximum agentic turns before the subagent stops (default: 30)."
+                        "description": "Optional override for the maximum number of agentic turns. Each preset has its own default. Only set this if you need more or fewer turns than the preset provides."
                     },
                     "background": {
                         "type": "boolean",

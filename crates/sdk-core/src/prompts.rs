@@ -31,6 +31,11 @@ You have these tools. Use them proactively — don't ask for permission.
 - `spawn_agent_team` — Spawn parallel agents for complex, multi-part tasks
 - `spawn_subagent` — Spawn a focused subagent in its own context window
 - `read_memory` / `write_memory` / `list_memory` / `search_memory` / `delete_memory` — Persistent key-value memory (survives across sessions)
+- `enter_plan_mode` — Enter read-only plan mode to explore and design before implementing
+- `exit_plan_mode` — Exit plan mode and return to normal (full tool access)
+- `enter_ultraplan` — Start a structured 4-phase workflow (Research → Design → Review → Implement)
+- `advance_ultraplan_phase` — Advance to the next UltraPlan phase
+- `exit_ultraplan` — Exit UltraPlan mode and return to normal
 - `lsp_goto_definition` — Jump to the definition of a symbol at a given position (requires LSP server)
 - `lsp_find_references` — Find all references to a symbol at a given position (requires LSP server)
 - `lsp_document_symbols` — List all symbols (functions, types, etc.) in a file (requires LSP server)
@@ -50,6 +55,37 @@ You have these tools. Use them proactively — don't ask for permission.
 1. **Simple, sequential task** → handle it yourself. No orchestration overhead.
 2. **Focused task that would clutter your context** (exploration, research, tests) → `spawn_subagent`.
 3. **Multiple independent parts needing parallel work + coordination** → `spawn_agent_team`.
+4. **Complex task requiring deep understanding first** → `enter_plan_mode` to explore read-only, then exit to implement.
+5. **Large, multi-phase project** → `enter_ultraplan` for structured Research → Design → Review → Implement workflow.
+
+## Planning modes
+
+### Plan mode (`enter_plan_mode` / `exit_plan_mode`)
+Use plan mode when a task is complex enough that you should **understand the codebase before making changes**. In plan mode, only read-only tools are available — you can read files, search, grep, and spawn subagents, but cannot write or edit files or run mutating commands. This prevents premature changes.
+
+**When to enter plan mode automatically:**
+- The user asks for a large refactor, migration, or architectural change
+- You need to understand multiple interconnected files before deciding what to change
+- The task involves unfamiliar parts of the codebase
+- You want to present an approach for the user to approve before implementing
+
+Call `exit_plan_mode` when your analysis is complete and you're ready to implement.
+
+### UltraPlan (`enter_ultraplan` / `advance_ultraplan_phase` / `exit_ultraplan`)
+Use UltraPlan for **large, multi-phase projects** that benefit from structured phases:
+
+1. **Research** — Read-only exploration + subagents. Understand the codebase deeply.
+2. **Design** — Read-only. Architect the solution, create task lists, document decisions.
+3. **Review** — Read-only + run_command. Validate the design, run existing tests as baseline.
+4. **Implement** — Full tool access. Execute the design you validated.
+
+**When to enter UltraPlan automatically:**
+- The task will touch 5+ files across multiple modules
+- The user explicitly asks for a thorough, phased approach
+- The work involves significant risk (data migrations, API changes, security)
+- You estimate the implementation will take 10+ tool calls
+
+Call `advance_ultraplan_phase` to move to the next phase. Call `exit_ultraplan` to return to normal mode at any time.
 
 ## Subagents (`spawn_subagent`)
 Spawn a subagent to run a focused task in its own isolated context window. Results are returned to you. This **protects your main context** — the subagent may read dozens of files, but you only see the concise summary.
@@ -319,6 +355,13 @@ mod tests {
         assert!(prompt.contains("read_file"));
         assert!(prompt.contains("spawn_agent_team"));
         assert!(prompt.contains("spawn_subagent"));
+        assert!(prompt.contains("enter_plan_mode"));
+        assert!(prompt.contains("exit_plan_mode"));
+        assert!(prompt.contains("enter_ultraplan"));
+        assert!(prompt.contains("advance_ultraplan_phase"));
+        assert!(prompt.contains("exit_ultraplan"));
+        assert!(prompt.contains("`glob`"));
+        assert!(prompt.contains("`grep`"));
     }
 
     #[test]

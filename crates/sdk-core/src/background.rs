@@ -19,6 +19,9 @@ pub enum BackgroundResultKind {
     AgentTeam,
     /// Partial/intermediate result from a running subagent.
     SubAgentPartial,
+    /// A single teammate within a team completed its task.
+    /// Delivered as tasks finish so the parent agent can see progress.
+    TeamTaskComplete,
     /// A compaction summary produced by an off-loop summarization subagent.
     /// `target_window_start` / `target_window_end` mark the range of messages
     /// that should be replaced by the summary (half-open interval
@@ -80,6 +83,7 @@ mod tests {
             BackgroundResultKind::SubAgent,
             BackgroundResultKind::AgentTeam,
             BackgroundResultKind::SubAgentPartial,
+            BackgroundResultKind::TeamTaskComplete,
         ] {
             let _ = k.clone();
         }

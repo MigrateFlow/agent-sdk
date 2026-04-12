@@ -17,6 +17,7 @@ use sdk_core::types::message::{
 use sdk_task::mailbox::broker::MessageBroker;
 use sdk_task::task::store::TaskStore;
 
+use sdk_core::background::BackgroundResult;
 use crate::context::AgentContext;
 use sdk_core::events::AgentEvent;
 use crate::handle::AgentHandle;
@@ -59,6 +60,9 @@ pub struct TeamLead {
     /// When non-empty, it is prepended to each teammate's role prompt so
     /// every teammate sees the shared objective in its system prompt.
     pub team_goal: String,
+    /// When set, per-task completion results are sent to the parent agent's
+    /// background channel so it sees progress as individual teammates finish.
+    pub background_tx: Option<tokio::sync::mpsc::UnboundedSender<BackgroundResult>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -193,6 +197,24 @@ impl TeamLead {
                             {
                                 total_tokens += payload.tokens_used;
                                 debug!(task_id = %payload.task_id, "Task completed notification");
+
+                                // Deliver per-task result to parent agent's conversation
+                                if let Some(ref bg_tx) = self.background_tx {
+                                    let teammate_name = name_map
+                                        .get(&msg.from)
+                                        .cloned()
+                                        .unwrap_or_else(|| msg.from.to_string());
+                                    let content = payload
+                                        .result_summary
+                                        .clone()
+                                        .unwrap_or_else(|| format!("Task {} completed", payload.task_id));
+                                    let _ = bg_tx.send(BackgroundResult {
+                                        name: teammate_name,
+                                        kind: sdk_core::background::BackgroundResultKind::TeamTaskComplete,
+                                        content,
+                                        tokens_used: payload.tokens_used,
+                                    });
+                                }
                             }
                         }
                         MessageKind::TaskFailed => {

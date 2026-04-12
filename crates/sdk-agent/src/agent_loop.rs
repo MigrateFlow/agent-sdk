@@ -927,10 +927,13 @@ impl AgentLoop {
                     // Partial results flow through the event channel only;
                     // they are not injected into the parent conversation.
                 }
-                BackgroundResultKind::SubAgent | BackgroundResultKind::AgentTeam => {
+                BackgroundResultKind::SubAgent
+                | BackgroundResultKind::AgentTeam
+                | BackgroundResultKind::TeamTaskComplete => {
                     let kind_label = match kind {
                         BackgroundResultKind::SubAgent => "subagent",
                         BackgroundResultKind::AgentTeam => "agent team",
+                        BackgroundResultKind::TeamTaskComplete => "teammate",
                         BackgroundResultKind::CompactionSummary { .. }
                         | BackgroundResultKind::SubAgentPartial => unreachable!(),
                     };

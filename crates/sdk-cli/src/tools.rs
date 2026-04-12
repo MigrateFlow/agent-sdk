@@ -17,6 +17,10 @@ use sdk_core::storage::AgentPaths;
 use sdk_core::traits::llm_client::LlmClient;
 use sdk_core::traits::tool::{Tool, ToolDefinition};
 
+use crate::mode_tools::{
+    AdvanceUltraPlanPhaseTool, EnterPlanModeTool, EnterUltraPlanTool, ExitPlanModeTool,
+    ExitUltraPlanTool, ModeState,
+};
 use crate::session::CliTask;
 
 pub struct UpdateTaskListTool {
@@ -96,6 +100,7 @@ pub fn build_tools(
     paths: &AgentPaths,
     memory_store: Option<Arc<MemoryStore>>,
     cli_agent_id: AgentId,
+    mode_state: Option<ModeState>,
 ) -> ToolRegistry {
     let filter = tool_filter
         .map(|names| ToolFilter::allow_only(names.iter().cloned()))
@@ -131,6 +136,16 @@ pub fn build_tools(
     }
 
     builder = builder.add_custom_tool(Arc::new(UpdateTaskListTool { tasks }));
+
+    // Mode tools: let the agent enter/exit plan mode and ultraplan programmatically
+    if let Some(ms) = mode_state {
+        builder = builder
+            .add_custom_tool(Arc::new(EnterPlanModeTool { state: ms.clone() }))
+            .add_custom_tool(Arc::new(ExitPlanModeTool { state: ms.clone() }))
+            .add_custom_tool(Arc::new(EnterUltraPlanTool { state: ms.clone() }))
+            .add_custom_tool(Arc::new(AdvanceUltraPlanPhaseTool { state: ms.clone() }))
+            .add_custom_tool(Arc::new(ExitUltraPlanTool { state: ms }));
+    }
 
     for tool in mcp_tools {
         builder = builder.add_custom_tool(tool.clone());

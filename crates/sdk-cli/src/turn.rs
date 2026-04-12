@@ -23,9 +23,13 @@ use crate::format::{
     lang_hint, print_team_plan, print_team_result_summary, truncate_tool_result,
     CyclingSpinner,
 };
+use crate::mode_tools::ModeState;
 use crate::ndjson::{emit_ndjson, NdjsonEvent};
 use crate::session::CliTask;
 use crate::tools::build_tools;
+
+use sdk_core::types::agent_mode::AgentMode;
+use sdk_core::types::ultra_plan::allowed_tools_for_phase;
 
 pub struct TurnStats {
     pub tokens: u64,
@@ -53,6 +57,7 @@ pub async fn run_turn(
     paths: &AgentPaths,
     memory_store: Option<Arc<MemoryStore>>,
     cli_agent_id: AgentId,
+    mode_state: Option<ModeState>,
 ) -> anyhow::Result<TurnStats> {
     let (background_tx, mut background_rx) =
         tokio::sync::mpsc::unbounded_channel::<BackgroundResult>();
@@ -60,14 +65,14 @@ pub async fn run_turn(
     let tools = build_tools(
         work_dir, allow_all, llm_client.clone(), llm_config.clone(),
         event_tx, tasks.clone(), subagent_registry, Some(background_tx),
-        tool_filter, mcp_tools, paths, memory_store, cli_agent_id,
+        tool_filter, mcp_tools, paths, memory_store, cli_agent_id, mode_state.clone(),
     );
-    let tool_defs = tools.definitions();
+    let all_tool_defs = tools.definitions();
     let started = Instant::now();
 
     if json_mode {
         emit_ndjson(&NdjsonEvent::Started {
-            tools: tool_defs.iter().map(|t| t.name.clone()).collect(),
+            tools: all_tool_defs.iter().map(|t| t.name.clone()).collect(),
         });
     }
 
@@ -82,6 +87,7 @@ pub async fn run_turn(
             let kind_label = match &result.kind {
                 BackgroundResultKind::SubAgent => "subagent",
                 BackgroundResultKind::AgentTeam => "agent team",
+                BackgroundResultKind::TeamTaskComplete => "teammate",
                 BackgroundResultKind::CompactionSummary { .. }
                 | BackgroundResultKind::SubAgentPartial => { continue; }
             };
@@ -100,8 +106,10 @@ pub async fn run_turn(
                 .iter()
                 .map(|m| m.char_len() / compaction_cfg.chars_per_token.max(1))
                 .sum();
-            let threshold = (max_ctx as f64 * compaction_cfg.proactive_compaction_ratio) as usize;
-            if estimated_tokens > threshold {
+            let token_threshold = (max_ctx as f64 * compaction_cfg.proactive_compaction_ratio) as usize;
+            let needs_compaction = estimated_tokens > token_threshold
+                || messages.len() > compaction_cfg.proactive_message_threshold;
+            if needs_compaction {
                 let before = messages.len();
                 let (freed, strategy) = compact_conversation(messages);
                 if freed > 0 && !json_mode {
@@ -113,6 +121,27 @@ pub async fn run_turn(
                         freed,
                         style(strategy).dim(),
                     );
+                }
+            }
+        }
+
+        // ── Sync system prompt suffix when mode changes mid-turn ──
+        if let Some(ref ms) = mode_state {
+            if let Some(ChatMessage::System { content }) = messages.first_mut() {
+                // Strip existing suffixes
+                if let Some(idx) = content.find("\n\n# PLAN MODE ACTIVE") {
+                    content.truncate(idx);
+                }
+                if let Some(idx) = content.find("\n# ULTRAPLAN:") {
+                    content.truncate(idx);
+                }
+                // Apply current mode suffix
+                let ultra = ms.ultra_plan.lock().ok().and_then(|g| g.clone());
+                let mode = ms.agent_mode.lock().ok().map(|g| g.clone()).unwrap_or(AgentMode::Normal);
+                if let Some(ref state) = ultra {
+                    content.push_str(sdk_core::types::ultra_plan::phase_system_suffix(&state.phase));
+                } else if mode == AgentMode::Plan {
+                    content.push_str(sdk_core::types::agent_mode::plan_mode_system_suffix());
                 }
             }
         }
@@ -152,8 +181,43 @@ pub async fn run_turn(
             streaming_started
         });
 
+        // Compute effective tool defs based on current mode (may change mid-turn
+        // when the agent calls enter_plan_mode / enter_ultraplan).
+        let effective_tool_defs = if let Some(ref ms) = mode_state {
+            let mode_tool_names: &[&str] = &[
+                "enter_plan_mode", "exit_plan_mode",
+                "enter_ultraplan", "advance_ultraplan_phase", "exit_ultraplan",
+            ];
+            let ultra = ms.ultra_plan.lock().ok().and_then(|g| g.clone());
+            let mode = ms.agent_mode.lock().ok().map(|g| g.clone()).unwrap_or(AgentMode::Normal);
+
+            if let Some(ref state) = ultra {
+                let allowed = allowed_tools_for_phase(&state.phase);
+                if allowed.is_empty() {
+                    all_tool_defs.clone() // Implement phase = all tools
+                } else {
+                    all_tool_defs
+                        .iter()
+                        .filter(|td| allowed.contains(&td.name.as_str()) || mode_tool_names.contains(&td.name.as_str()))
+                        .cloned()
+                        .collect()
+                }
+            } else if mode == AgentMode::Plan {
+                let allowed = sdk_core::types::agent_mode::PLAN_MODE_READONLY_TOOLS;
+                all_tool_defs
+                    .iter()
+                    .filter(|td| allowed.contains(&td.name.as_str()) || mode_tool_names.contains(&td.name.as_str()))
+                    .cloned()
+                    .collect()
+            } else {
+                all_tool_defs.clone()
+            }
+        } else {
+            all_tool_defs.clone()
+        };
+
         let messages_snapshot = messages.clone();
-        let llm_fut = llm_client.chat_stream(&messages_snapshot, &tool_defs, delta_tx);
+        let llm_fut = llm_client.chat_stream(&messages_snapshot, &effective_tool_defs, delta_tx);
 
         tokio::pin!(llm_fut);
         let result = tokio::select! {

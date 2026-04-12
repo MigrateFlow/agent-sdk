@@ -213,6 +213,12 @@ impl Teammate {
                                 continue;
                             }
 
+                            let result_summary = if result.notes.is_empty() {
+                                None
+                            } else {
+                                Some(result.notes.clone())
+                            };
+
                             if let Err(e) =
                                 self.ctx
                                     .task_store
@@ -241,6 +247,7 @@ impl Teammate {
                                     serde_json::to_value(TaskCompletePayload {
                                         task_id,
                                         tokens_used: tokens,
+                                        result_summary,
                                     })
                                     .unwrap_or_default(),
                                 );

@@ -306,6 +306,11 @@ pub struct CompactionConfig {
     /// Fraction of max_context_tokens at which proactive compaction fires.
     #[serde(default = "CompactionConfig::default_proactive_compaction_ratio")]
     pub proactive_compaction_ratio: f64,
+    /// Message count at which proactive compaction fires regardless of token estimate.
+    /// This catches cases where many small messages accumulate without reaching the
+    /// token threshold (e.g. read_file + grep calls with small results).
+    #[serde(default = "CompactionConfig::default_proactive_message_threshold")]
+    pub proactive_message_threshold: usize,
 
     // ── Dynamic strategy selection thresholds ──
 
@@ -338,6 +343,7 @@ impl CompactionConfig {
     fn default_keep_recent() -> usize { 10 }
     fn default_summarization_overflow_ratio() -> f64 { 1.8 }
     fn default_proactive_compaction_ratio() -> f64 { 0.80 }
+    fn default_proactive_message_threshold() -> usize { 40 }
     fn default_aggressive_overflow_ratio() -> f64 { 1.8 }
     fn default_aggressive_message_count() -> usize { 80 }
     fn default_tool_ratio_threshold() -> f64 { 0.35 }
@@ -355,6 +361,7 @@ impl Default for CompactionConfig {
             keep_recent: Self::default_keep_recent(),
             summarization_overflow_ratio: Self::default_summarization_overflow_ratio(),
             proactive_compaction_ratio: Self::default_proactive_compaction_ratio(),
+            proactive_message_threshold: Self::default_proactive_message_threshold(),
             aggressive_overflow_ratio: Self::default_aggressive_overflow_ratio(),
             aggressive_message_count: Self::default_aggressive_message_count(),
             tool_ratio_threshold: Self::default_tool_ratio_threshold(),
@@ -836,6 +843,7 @@ mod tests {
         assert_eq!(cfg.compaction.keep_recent, 10);
         assert!((cfg.compaction.summarization_overflow_ratio - 1.8).abs() < 0.001);
         assert!((cfg.compaction.proactive_compaction_ratio - 0.80).abs() < 0.001);
+        assert_eq!(cfg.compaction.proactive_message_threshold, 40);
         // ToolLimitsConfig defaults
         assert_eq!(cfg.tool_limits.glob_max_results, 200);
         assert_eq!(cfg.tool_limits.grep_head_limit, 250);

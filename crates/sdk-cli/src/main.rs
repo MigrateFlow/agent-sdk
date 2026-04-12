@@ -20,6 +20,7 @@ use sdk_core::types::ultra_plan::{UltraPlanState, allowed_tools_for_phase, phase
 use sdk_cli::cache_commands::CacheState;
 use sdk_cli::commands::{CommandContext, CommandOutcome, SlashCommandRegistry};
 use sdk_cli::compaction::compact_conversation;
+use sdk_cli::mode_tools::ModeState;
 use sdk_cli::display::{format_token_count, print_task_list};
 use sdk_cli::event_handler::run_event_handler;
 use sdk_cli::format::{print_usage, print_welcome};
@@ -208,12 +209,13 @@ async fn main() -> anyhow::Result<()> {
         let mut messages = vec![ChatMessage::system(&system_prompt)];
         let tasks = Arc::new(Mutex::new(Vec::<CliTask>::new()));
         let tool_filter = cli.tools.as_deref();
+        let one_shot_mode = ModeState::new(AgentMode::Normal, None);
 
         let result = run_turn(
             &mut messages, &prompt, &llm_client, &llm_config, &work_dir,
             cli.max_iterations, cli.allow_all_commands, Some(event_tx), tasks,
             interrupt, subagent_registry, cli.json, tool_filter, &mcp_tools,
-            &paths, memory_store, cli_agent_id,
+            &paths, memory_store, cli_agent_id, Some(one_shot_mode),
         ).await;
 
         match result {
@@ -227,7 +229,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── Interactive REPL ──
-    let tool_count = 13 + mcp_tools.len() + if memory_store.is_some() { 5 } else { 0 };
+    let tool_count = 18 + mcp_tools.len() + if memory_store.is_some() { 5 } else { 0 };
     let provider_name = match llm_config.provider { LlmProvider::Claude => "claude", LlmProvider::OpenAi => "openai" };
     print_welcome(&model, provider_name, &work_dir, tool_count, mcp_tools.len(), None);
 
@@ -235,6 +237,9 @@ async fn main() -> anyhow::Result<()> {
     let tasks = Arc::new(Mutex::new(Vec::<CliTask>::new()));
     let mut agent_mode = AgentMode::Normal;
     let mut ultra_plan_state: Option<UltraPlanState> = None;
+
+    // Shared mode state — lets LLM-callable tools mutate agent_mode / ultra_plan
+    let mode_state = ModeState::new(agent_mode.clone(), ultra_plan_state.clone());
 
     // ── Cache state ──
     let file_cache = Arc::new(sdk_core::cache::FileStateCache::new());
@@ -263,6 +268,12 @@ async fn main() -> anyhow::Result<()> {
         }
         None => vec![ChatMessage::system(&system_prompt)],
     };
+
+    // Sync restored session mode into shared state
+    {
+        *mode_state.agent_mode.lock().expect("mode lock") = agent_mode.clone();
+        *mode_state.ultra_plan.lock().expect("ultra lock") = ultra_plan_state.clone();
+    }
 
     let mut session_tokens = 0u64;
     let mut session_tool_calls = 0usize;
@@ -350,12 +361,25 @@ async fn main() -> anyhow::Result<()> {
             if let Some(ref state) = ultra_plan_state { content.push_str(phase_system_suffix(&state.phase)); }
         }
 
-        // Compute effective tool filter
+        // Compute effective tool filter — always include mode-transition tools
+        // so the agent can exit the mode it's in.
+        let mode_tools: &[&str] = &[
+            "enter_plan_mode", "exit_plan_mode",
+            "enter_ultraplan", "advance_ultraplan_phase", "exit_ultraplan",
+        ];
         let plan_filter: Option<Vec<String>> = if ultra_plan_state.is_some() {
             let tools = allowed_tools_for_phase(&ultra_plan_state.as_ref().unwrap().phase);
-            if tools.is_empty() { None } else { Some(tools.iter().map(|s| s.to_string()).collect()) }
+            if tools.is_empty() {
+                None
+            } else {
+                let mut all: Vec<String> = tools.iter().map(|s| s.to_string()).collect();
+                for mt in mode_tools { all.push(mt.to_string()); }
+                Some(all)
+            }
         } else if agent_mode == AgentMode::Plan {
-            Some(PLAN_MODE_READONLY_TOOLS.iter().map(|s| s.to_string()).collect())
+            let mut all: Vec<String> = PLAN_MODE_READONLY_TOOLS.iter().map(|s| s.to_string()).collect();
+            for mt in mode_tools { all.push(mt.to_string()); }
+            Some(all)
         } else { None };
 
         // ── Auto-compaction before turn: compact when context approaches limit ──
@@ -366,8 +390,10 @@ async fn main() -> anyhow::Result<()> {
                 .iter()
                 .map(|m| m.char_len() / compaction_cfg.chars_per_token.max(1))
                 .sum();
-            let threshold = (max_ctx as f64 * compaction_cfg.proactive_compaction_ratio) as usize;
-            if estimated_tokens > threshold {
+            let token_threshold = (max_ctx as f64 * compaction_cfg.proactive_compaction_ratio) as usize;
+            let needs_compaction = estimated_tokens > token_threshold
+                || messages.len() > compaction_cfg.proactive_message_threshold;
+            if needs_compaction {
                 let before = messages.len();
                 let (freed, strategy) = compact_conversation(&mut messages);
                 if freed > 0 {
@@ -383,12 +409,25 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        // Sync local mode → shared state (so tools see slash-command changes)
+        {
+            *mode_state.agent_mode.lock().expect("mode lock") = agent_mode.clone();
+            *mode_state.ultra_plan.lock().expect("ultra lock") = ultra_plan_state.clone();
+        }
+
         let stats = run_turn(
             &mut messages, &input, &llm_client, &llm_config, &work_dir,
             cli.max_iterations, cli.allow_all_commands, Some(event_tx.clone()), tasks.clone(),
             interrupt.clone(), subagent_registry.clone(), false, plan_filter.as_deref(),
             &mcp_tools, &paths, memory_store.clone(), cli_agent_id,
+            Some(mode_state.clone()),
         ).await?;
+
+        // Sync shared state → local mode (so tool-initiated mode changes take effect)
+        {
+            agent_mode = mode_state.agent_mode.lock().expect("mode lock").clone();
+            ultra_plan_state = mode_state.ultra_plan.lock().expect("ultra lock").clone();
+        }
 
         session_tokens += stats.tokens;
         session_tool_calls += stats.tool_calls;

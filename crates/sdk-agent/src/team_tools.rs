@@ -255,6 +255,7 @@ impl Tool for SpawnAgentTeamTool {
             hooks: Arc::new(HookRegistry::new()),
             teammate_specs,
             team_goal: String::new(),
+            background_tx: self.background_tx.clone(),
         };
 
         if request.background {

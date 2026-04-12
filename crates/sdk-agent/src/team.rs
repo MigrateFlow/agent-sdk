@@ -311,6 +311,7 @@ impl AgentTeam {
             hooks,
             teammate_specs: self.teammate_specs.clone(),
             team_goal: goal_trimmed.to_string(),
+            background_tx: None,
         };
 
         // TeamSpawned is emitted by the TeamLead after it has the accurate count.

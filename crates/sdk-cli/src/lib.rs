@@ -6,6 +6,7 @@ pub mod display;
 pub mod event_handler;
 pub mod format;
 pub mod mcp;
+pub mod mode_tools;
 pub mod ndjson;
 pub mod plan_commands;
 pub mod session;
