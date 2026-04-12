@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use console::style;
 
 use crate::compaction::compact_conversation;
+use crate::cost::{format_cost, format_cost_suffix, SessionCostTracker};
 use crate::display::{display_path, format_bytes, format_token_count, print_task_list, truncate};
 use crate::session::CliTask;
 use sdk_core::error::{SdkError, SdkResult};
@@ -56,6 +57,8 @@ pub struct CommandContext<'a> {
     pub agent_mode: &'a mut sdk_core::AgentMode,
     pub cache_state: Option<Arc<crate::cache_commands::CacheState>>,
     pub ultra_plan: &'a mut Option<sdk_core::types::ultra_plan::UltraPlanState>,
+    pub cost_tracker: &'a mut SessionCostTracker,
+    pub session_start: std::time::Instant,
 }
 
 impl<'a> CommandContext<'a> {
@@ -350,6 +353,7 @@ impl SlashCommand for ClearCommand {
         *ctx.total_tokens = 0;
         *ctx.tool_calls = 0;
         *ctx.turns = 0;
+        ctx.cost_tracker.clear();
         ctx.save()?;
         Ok(CommandOutcome::Clear)
     }
@@ -439,6 +443,8 @@ impl SlashCommand for CostCommand {
             *ctx.total_tokens,
             *ctx.tool_calls,
             *ctx.turns,
+            ctx.cost_tracker,
+            ctx.session_start,
         );
         Ok(CommandOutcome::Continue)
     }
@@ -477,6 +483,7 @@ impl SlashCommand for StatusCommand {
 
         let session_id = crate::session_manager::SessionManager::session_id_from_path(&ctx.session_path);
         let active_label = if *ctx.turns > 0 { "active" } else { "new" };
+        let cost_suffix = format_cost_suffix(ctx.cost_tracker);
 
         let mut lines = vec![
             format!(
@@ -502,6 +509,15 @@ impl SlashCommand for StatusCommand {
                 style(if *ctx.tool_calls == 1 { "use" } else { "uses" }).dim(),
             ),
         ];
+
+        // Show cost if available
+        if !cost_suffix.is_empty() {
+            lines.push(format!(
+                "{}  {}",
+                style("Cost:").dim(),
+                style(format_cost(ctx.cost_tracker.total_cost())).white(),
+            ));
+        }
 
         // Show cache stats if available
         if let Some(ref cache) = ctx.cache_state {
@@ -543,7 +559,26 @@ fn print_cost_summary(
     session_tokens: u64,
     session_tool_calls: usize,
     session_turns: usize,
+    cost_tracker: &SessionCostTracker,
+    session_start: std::time::Instant,
 ) {
+    let title = style("Cost").bold().to_string();
+
+    // If the in-memory tracker has entries, use its richer breakdown.
+    if cost_tracker.call_count() > 0 {
+        let elapsed = session_start.elapsed();
+        let lines = cost_tracker.format_breakdown(session_turns, Some(elapsed));
+        eprintln!();
+        crate::ui::Panel::new()
+            .title(title)
+            .color(console::Color::Cyan)
+            .render(&lines);
+        eprintln!();
+        return;
+    }
+
+    // Fall back to reading cost.jsonl (for sessions that started before
+    // the in-memory tracker was introduced, or when no LLM calls yet).
     let cost_path = session_path
         .parent()
         .map(|p| p.join("cost.jsonl"))
@@ -559,30 +594,46 @@ fn print_cost_summary(
         }
     };
 
-    let title = format!(
-        "{} {}",
-        style("Cost").bold(),
-        style(display_path(&cost_path)).dim(),
-    );
-
     if records.is_empty() {
         let lines = vec![
             format!(
-                "{} · {} · {} tool {}",
+                "{} \u{00b7} {} \u{00b7} {} tool {}",
                 style(format!("{} turns", session_turns)).white(),
                 style(format!("{} tokens", format_token_count(session_tokens))).white(),
                 style(session_tool_calls).white(),
                 if session_tool_calls == 1 { "use" } else { "uses" },
             ),
-            style("(no cost entries yet — start a turn to populate cost.jsonl)").dim().to_string(),
+            style("(no cost entries yet \u{2014} start a turn to populate cost.jsonl)")
+                .dim()
+                .to_string(),
         ];
         eprintln!();
-        crate::ui::Panel::new().title(title).color(console::Color::Cyan).render(&lines);
+        crate::ui::Panel::new()
+            .title(title)
+            .color(console::Color::Cyan)
+            .render(&lines);
         eprintln!();
         return;
     }
 
     let mut lines = Vec::new();
+
+    // Aggregate by model for the richer display
+    let mut tot_usd = 0.0f64;
+    let mut tot_tokens = 0u64;
+    for r in &records {
+        tot_usd += r.estimated_usd;
+        tot_tokens += r.tokens_in + r.tokens_out + r.cache_in + r.cache_read;
+    }
+
+    lines.push(format!(
+        "{} {} ({})",
+        style("Total:").bold(),
+        style(format_cost(tot_usd)).white().bold(),
+        style(format!("{} tokens", format_token_count(tot_tokens))).dim(),
+    ));
+
+    lines.push(String::new());
     lines.push(format!(
         "{:<28} {:>10} {:>10} {:>10} {:>10} {:>10}",
         style("model").dim(),
@@ -597,35 +648,45 @@ fn print_cost_summary(
     let mut tot_out = 0u64;
     let mut tot_cw = 0u64;
     let mut tot_cr = 0u64;
-    let mut tot_usd = 0.0f64;
     for r in &records {
         tot_in += r.tokens_in;
         tot_out += r.tokens_out;
         tot_cw += r.cache_in;
         tot_cr += r.cache_read;
-        tot_usd += r.estimated_usd;
         lines.push(format!(
-            "{:<28} {:>10} {:>10} {:>10} {:>10} {:>10.4}",
+            "{:<28} {:>10} {:>10} {:>10} {:>10} {:>10}",
             truncate(&r.model, 28),
             format_token_count(r.tokens_in),
             format_token_count(r.tokens_out),
             format_token_count(r.cache_in),
             format_token_count(r.cache_read),
-            r.estimated_usd,
+            format_cost(r.estimated_usd),
         ));
     }
     lines.push(format!(
-        "{:<28} {:>10} {:>10} {:>10} {:>10} {:>10.4}",
+        "{:<28} {:>10} {:>10} {:>10} {:>10} {:>10}",
         style("total").bold().to_string(),
         format_token_count(tot_in),
         format_token_count(tot_out),
         format_token_count(tot_cw),
         format_token_count(tot_cr),
-        tot_usd,
+        format_cost(tot_usd),
+    ));
+
+    lines.push(String::new());
+    lines.push(format!(
+        "{} {} turns \u{00b7} {} tool {}",
+        style("Session:").dim(),
+        session_turns,
+        session_tool_calls,
+        if session_tool_calls == 1 { "use" } else { "uses" },
     ));
 
     eprintln!();
-    crate::ui::Panel::new().title(title).color(console::Color::Cyan).render(&lines);
+    crate::ui::Panel::new()
+        .title(title)
+        .color(console::Color::Cyan)
+        .render(&lines);
     eprintln!();
 }
 

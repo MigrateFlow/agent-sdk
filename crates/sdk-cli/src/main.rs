@@ -21,6 +21,7 @@ use sdk_cli::cache_commands::CacheState;
 use sdk_cli::permission::PermissionState;
 use sdk_cli::commands::{CommandContext, CommandOutcome, SlashCommandRegistry};
 use sdk_cli::compaction::compact_conversation;
+use sdk_cli::cost::SessionCostTracker;
 use sdk_cli::mode_tools::ModeState;
 use sdk_cli::display::{format_token_count, print_task_list};
 use sdk_cli::event_handler::run_event_handler;
@@ -282,6 +283,8 @@ async fn main() -> anyhow::Result<()> {
     let mut session_tokens = 0u64;
     let mut session_tool_calls = 0usize;
     let mut session_turns = 0usize;
+    let mut cost_tracker = SessionCostTracker::new();
+    let session_start = std::time::Instant::now();
 
     // ── Session PID tracking ──
     let session_id = SessionManager::session_id_from_path(&session_path);
@@ -317,6 +320,7 @@ async fn main() -> anyhow::Result<()> {
                 total_tokens: &mut session_tokens, tool_calls: &mut session_tool_calls,
                 turns: &mut session_turns, agent_mode: &mut agent_mode,
                 cache_state: Some(cache_state.clone()), ultra_plan: &mut ultra_plan_state,
+                cost_tracker: &mut cost_tracker, session_start,
             };
 
             match slash_registry.dispatch(&input, &mut ctx).await {
@@ -336,7 +340,7 @@ async fn main() -> anyhow::Result<()> {
                         None => vec![ChatMessage::system(&system_prompt)],
                     };
                     session_path = path;
-                    session_tokens = 0; session_tool_calls = 0; session_turns = 0;
+                    session_tokens = 0; session_tool_calls = 0; session_turns = 0; cost_tracker.clear();
                     let new_id = SessionManager::session_id_from_path(&session_path);
                     if let Some(dir) = session_path.parent() { let _ = SessionManager::register_pid(dir, &new_id); }
                     eprintln!("  {} Session switched ({} messages)", style("ok").green(), style(messages.len()).dim());
@@ -437,8 +441,14 @@ async fn main() -> anyhow::Result<()> {
         session_tokens += stats.tokens;
         session_tool_calls += stats.tool_calls;
         session_turns += 1;
+        cost_tracker.record_simple(&model, stats.tokens);
 
         print_usage(stats.tokens, stats.tool_calls, stats.iterations, stats.duration);
+        let session_cost = cost_tracker.total_cost();
+        if session_cost > 0.0001 {
+            eprintln!("  {}", console::style(format!("Total cost: {}", sdk_cli::cost::format_cost(session_cost))).dim());
+            eprintln!();
+        }
 
         if let Err(e) = save_session_full(&session_path, &messages, &tasks.lock().expect("task list mutex poisoned"), ultra_plan_state.as_ref()) {
             eprintln!("  {} session save: {}", style("⚠").yellow(), e);
@@ -450,12 +460,14 @@ async fn main() -> anyhow::Result<()> {
     if let Some(sessions_dir) = session_path.parent() { SessionManager::cleanup_pid(sessions_dir, &final_session_id); }
 
     eprintln!();
-    eprintln!("  {} {} · {} · {} tool {}",
+    let cost_suffix = sdk_cli::cost::format_cost_suffix(&cost_tracker);
+    eprintln!("  {} {} \u{00b7} {} \u{00b7} {} tool {}{}",
         style("Session:").dim(),
         style(format!("{} turns", session_turns)).dim(),
         style(format!("{} tokens", format_token_count(session_tokens))).dim(),
         style(session_tool_calls).dim(),
         if session_tool_calls == 1 { "use" } else { "uses" },
+        cost_suffix,
     );
     eprintln!();
     Ok(())
