@@ -36,6 +36,8 @@ pub enum CommandOutcome {
     Quit,
     /// Emit the given text to the user (printed to stderr by the REPL).
     Output(String),
+    /// Signal the REPL to switch to a different session file.
+    SessionSwitch { path: PathBuf },
 }
 
 /// Mutable pieces of REPL state a slash command may read or change.
@@ -124,6 +126,9 @@ impl SlashCommandRegistry {
         r.register(Arc::new(TasksCommand));
         r.register(Arc::new(CostCommand));
         r.register(Arc::new(StatusCommand));
+        r.register(Arc::new(crate::session_commands::SessionsCommand));
+        r.register(Arc::new(crate::session_commands::ResumeCommand));
+        r.register(Arc::new(crate::session_commands::SessionDescribeCommand));
         r.register(Arc::new(QuitCommand));
         r
     }

@@ -26,6 +26,8 @@ pub struct CliSessionData {
     pub messages: Vec<ChatMessage>,
     #[serde(default)]
     pub tasks: Vec<CliTask>,
+    #[serde(default)]
+    pub metadata: Option<crate::session_manager::SessionMetadata>,
 }
 
 /// Return the default session-file path for a given working directory.
@@ -49,6 +51,7 @@ pub fn load_session(path: &Path, system_prompt: &str) -> Option<CliSessionData> 
                 .map(|messages| CliSessionData {
                     messages,
                     tasks: Vec::new(),
+                    metadata: None,
                 })
         })?;
 
@@ -64,12 +67,34 @@ pub fn save_session(
     messages: &[ChatMessage],
     tasks: &[CliTask],
 ) -> std::io::Result<()> {
+    write_session(path, messages, tasks, None)
+}
+
+/// Persist a CLI session with metadata, updating timestamps and counts.
+pub fn save_session_with_metadata(
+    path: &Path,
+    messages: &[ChatMessage],
+    tasks: &[CliTask],
+    metadata: &mut crate::session_manager::SessionMetadata,
+) -> std::io::Result<()> {
+    metadata.updated_at = chrono::Utc::now().to_rfc3339();
+    metadata.message_count = messages.len();
+    write_session(path, messages, tasks, Some(metadata.clone()))
+}
+
+fn write_session(
+    path: &Path,
+    messages: &[ChatMessage],
+    tasks: &[CliTask],
+    metadata: Option<crate::session_manager::SessionMetadata>,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let session = CliSessionData {
         messages: messages.to_vec(),
         tasks: tasks.to_vec(),
+        metadata,
     };
     let json = serde_json::to_string(&session)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;

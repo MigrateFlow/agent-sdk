@@ -1441,7 +1441,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let session_path = cli
+    let mut session_path = cli
         .session
         .unwrap_or_else(|| default_session_path(&work_dir));
 
@@ -1553,6 +1553,22 @@ async fn main() -> anyhow::Result<()> {
     let mut session_tool_calls = 0usize;
     let mut session_turns = 0usize;
 
+    // ── Session PID tracking ──
+    let session_id = agent_sdk::cli::SessionManager::session_id_from_path(&session_path);
+    if let Some(sessions_dir) = session_path.parent() {
+        let _ = agent_sdk::cli::SessionManager::register_pid(sessions_dir, &session_id);
+
+        // Report any interrupted sessions from previous runs
+        let interrupted = agent_sdk::cli::SessionManager::detect_interrupted(sessions_dir);
+        if !interrupted.is_empty() {
+            eprintln!(
+                "   {} {} interrupted session(s) detected (use /sessions to view)",
+                style("!").yellow(),
+                interrupted.len(),
+            );
+        }
+    }
+
     // Derive project name from the work directory for the prompt
     let project_name = work_dir
         .file_name()
@@ -1600,6 +1616,41 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
                 Ok(Some(CommandOutcome::Continue)) => continue,
+                Ok(Some(CommandOutcome::SessionSwitch { path })) => {
+                    // Clean up PID for old session
+                    let old_id = agent_sdk::cli::SessionManager::session_id_from_path(&session_path);
+                    if let Some(dir) = session_path.parent() {
+                        agent_sdk::cli::SessionManager::cleanup_pid(dir, &old_id);
+                    }
+
+                    // Switch to the target session
+                    messages = match load_session(&path, &system_prompt) {
+                        Some(session) => {
+                            let mut current = tasks.lock().expect("task list mutex poisoned");
+                            *current = session.tasks;
+                            session.messages
+                        }
+                        None => vec![ChatMessage::system(&system_prompt)],
+                    };
+                    session_path = path;
+                    session_tokens = 0;
+                    session_tool_calls = 0;
+                    session_turns = 0;
+
+                    // Register PID for new session
+                    let new_id = agent_sdk::cli::SessionManager::session_id_from_path(&session_path);
+                    if let Some(dir) = session_path.parent() {
+                        let _ = agent_sdk::cli::SessionManager::register_pid(dir, &new_id);
+                    }
+
+                    eprintln!(
+                        "  {} Session switched ({} messages)",
+                        style("ok").green(),
+                        style(messages.len()).dim(),
+                    );
+                    eprintln!();
+                    continue;
+                }
                 Ok(None) => {
                     // Not a slash command — fall through to regular prompt.
                 }
@@ -1646,6 +1697,12 @@ async fn main() -> anyhow::Result<()> {
         ) {
             eprintln!("  {} session save: {}", style("⚠").yellow(), e);
         }
+    }
+
+    // ── Cleanup PID tracking ──
+    let final_session_id = agent_sdk::cli::SessionManager::session_id_from_path(&session_path);
+    if let Some(sessions_dir) = session_path.parent() {
+        agent_sdk::cli::SessionManager::cleanup_pid(sessions_dir, &final_session_id);
     }
 
     eprintln!();

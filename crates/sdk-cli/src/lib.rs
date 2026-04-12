@@ -2,5 +2,8 @@ pub mod commands;
 pub mod compaction;
 pub mod display;
 pub mod session;
+pub mod session_commands;
+pub mod session_manager;
 
 pub use commands::{CommandContext, CommandOutcome, SlashCommand, SlashCommandRegistry};
+pub use session_manager::{SessionManager, SessionMetadata, SessionStatus};
