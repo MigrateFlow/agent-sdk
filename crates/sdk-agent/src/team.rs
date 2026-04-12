@@ -160,6 +160,7 @@ impl AgentTeam {
             prompt: prompt.into(),
             require_plan_approval: false,
             isolation: None,
+            model: None,
         });
         self
     }
@@ -177,6 +178,7 @@ impl AgentTeam {
             prompt: prompt.into(),
             require_plan_approval: true,
             isolation: None,
+            model: None,
         });
         self
     }
@@ -197,6 +199,27 @@ impl AgentTeam {
             prompt: prompt.into(),
             require_plan_approval: false,
             isolation: Some(isolation),
+            model: None,
+        });
+        self
+    }
+
+    /// Add a teammate with a specific LLM model override.
+    ///
+    /// This enables cost-efficient mixing: e.g. a fast model for exploration
+    /// and a powerful model for implementation.
+    pub fn add_teammate_with_model(
+        mut self,
+        name: impl Into<String>,
+        prompt: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        self.teammate_specs.push(TeammateSpec {
+            name: name.into(),
+            prompt: prompt.into(),
+            require_plan_approval: false,
+            isolation: None,
+            model: Some(model.into()),
         });
         self
     }
@@ -278,6 +301,7 @@ impl AgentTeam {
             task_store,
             broker,
             llm_client: client,
+            llm_config: self.llm_config.clone(),
             prompt_builder: self.prompt_builder.clone(),
             config: self.agent_config.clone(),
             source_root: self.source_root.clone(),
