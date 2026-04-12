@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use sdk_agent::builder::{
-    CommandToolPolicy, DefaultToolsetBuilder, SubAgentToolConfig, TeamToolConfig, ToolFilter,
+    AgentToolConfig, CommandToolPolicy, DefaultToolsetBuilder, ToolFilter,
 };
 use sdk_agent::subagent::SubAgentRegistry;
 use sdk_core::background::BackgroundResult;
@@ -90,7 +90,7 @@ pub fn build_tools(
     work_dir: &Path,
     _allow_all: bool,
     llm_client: Arc<dyn LlmClient>,
-    llm_config: sdk_core::config::LlmConfig,
+    _llm_config: sdk_core::config::LlmConfig,
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
     tasks: Arc<Mutex<Vec<CliTask>>>,
     subagent_registry: Arc<SubAgentRegistry>,
@@ -114,15 +114,7 @@ pub fn build_tools(
             command_policy,
         )
         .add_lsp_tools(paths.project_lsp_config_path(), work_dir.to_path_buf())
-        .add_team_tool(TeamToolConfig {
-            work_dir: work_dir.to_path_buf(),
-            source_root: work_dir.to_path_buf(),
-            llm_client: llm_client.clone(),
-            llm_config: llm_config.clone(),
-            event_tx: event_tx.clone(),
-            background_tx: background_tx.clone(),
-        })
-        .add_subagent_tool(SubAgentToolConfig {
+        .add_agent_tool(AgentToolConfig {
             work_dir: work_dir.to_path_buf(),
             source_root: work_dir.to_path_buf(),
             llm_client,

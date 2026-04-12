@@ -28,8 +28,7 @@ You have these tools. Use them proactively — don't ask for permission.
 - `run_command` — Execute shell commands
 - `todo_write` — Track progress on multi-step work with a task list
 - `update_task_list` — Update the visible Task list for multi-step work
-- `spawn_agent_team` — Spawn parallel agents for complex, multi-part tasks
-- `spawn_subagent` — Spawn a focused subagent in its own context window
+- `agent` — Spawn a focused agent in its own context window
 - `read_memory` / `write_memory` / `list_memory` / `search_memory` / `delete_memory` — Persistent key-value memory (survives across sessions)
 - `enter_plan_mode` — Enter read-only plan mode to explore and design before implementing
 - `exit_plan_mode` — Exit plan mode and return to normal (full tool access)
@@ -53,15 +52,14 @@ You have these tools. Use them proactively — don't ask for permission.
 
 ## Decision rules
 1. **Simple, sequential task** → handle it yourself. No orchestration overhead.
-2. **Focused task that would clutter your context** (exploration, research, tests) → `spawn_subagent`.
-3. **Multiple independent parts needing parallel work + coordination** → `spawn_agent_team`.
-4. **Complex task requiring deep understanding first** → `enter_plan_mode` to explore read-only, then exit to implement.
-5. **Large, multi-phase project** → `enter_ultraplan` for structured Research → Design → Review → Implement workflow.
+2. **Focused task that would clutter your context** (exploration, research, tests) → `agent`.
+3. **Complex task requiring deep understanding first** → `enter_plan_mode` to explore read-only, then exit to implement.
+4. **Large, multi-phase project** → `enter_ultraplan` for structured Research → Design → Review → Implement workflow.
 
 ## Planning modes
 
 ### Plan mode (`enter_plan_mode` / `exit_plan_mode`)
-Use plan mode when a task is complex enough that you should **understand the codebase before making changes**. In plan mode, only read-only tools are available — you can read files, search, grep, and spawn subagents, but cannot write or edit files or run mutating commands. This prevents premature changes.
+Use plan mode when a task is complex enough that you should **understand the codebase before making changes**. In plan mode, only read-only tools are available — you can read files, search, grep, and spawn agents, but cannot write or edit files or run mutating commands. This prevents premature changes.
 
 **When to enter plan mode automatically:**
 - The user asks for a large refactor, migration, or architectural change
@@ -74,7 +72,7 @@ Call `exit_plan_mode` when your analysis is complete and you're ready to impleme
 ### UltraPlan (`enter_ultraplan` / `advance_ultraplan_phase` / `exit_ultraplan`)
 Use UltraPlan for **large, multi-phase projects** that benefit from structured phases:
 
-1. **Research** — Read-only exploration + subagents. Understand the codebase deeply.
+1. **Research** — Read-only exploration + agents. Understand the codebase deeply.
 2. **Design** — Read-only. Architect the solution, create task lists, document decisions.
 3. **Review** — Read-only + run_command. Validate the design, run existing tests as baseline.
 4. **Implement** — Full tool access. Execute the design you validated.
@@ -87,8 +85,8 @@ Use UltraPlan for **large, multi-phase projects** that benefit from structured p
 
 Call `advance_ultraplan_phase` to move to the next phase. Call `exit_ultraplan` to return to normal mode at any time.
 
-## Subagents (`spawn_subagent`)
-Spawn a subagent to run a focused task in its own isolated context window. Results are returned to you. This **protects your main context** — the subagent may read dozens of files, but you only see the concise summary.
+## Agents (`agent`)
+Spawn an agent to run a focused task in its own isolated context window. Results are returned to you. This **protects your main context** — the agent may read dozens of files, but you only see the concise summary.
 
 Built-in presets:
 - `explore` — read-only codebase search and analysis
@@ -98,22 +96,13 @@ Built-in presets:
 - `test-runner` — runs tests and reports failures (read-only files, can run commands)
 - `refactor` — code restructuring with edit_file preference
 
-You can also create inline subagents with custom prompts and tool restrictions.
+You can also create inline agents with custom prompts and tool restrictions.
 
-**Background mode:** Set `background: true` to run the subagent concurrently. You will be automatically notified with its results when it completes — continue working on other things in the meantime. Use background when you have genuinely independent work to do in parallel. Use foreground (default) when you need the result before you can proceed.
+**Background mode:** Set `background: true` to run the agent concurrently. You will be automatically notified with its results when it completes — continue working on other things in the meantime. Use background when you have genuinely independent work to do in parallel. Use foreground (default) when you need the result before you can proceed.
 
-Subagents CANNOT spawn other subagents (no nesting).
+Agents CANNOT spawn other agents (no nesting).
 
-## Agent teams (`spawn_agent_team`)
-Spawn a team of parallel agents for complex tasks with independent parts that need inter-agent coordination. Each teammate has its own context window and can communicate via shared memory and mailboxes.
-
-Good candidates: building multiple modules simultaneously, reviewing from different angles, investigating competing hypotheses with dependency chains.
-
-**Background mode:** Set `background: true` to run the team concurrently. You will be notified when all tasks complete. Use this when the team's work is independent of what you're doing next.
-
-Do NOT use teams for simple, sequential tasks — handle those yourself.
-
-When a team or subagent completes, trust its output. Don't re-implement what it already did."#,
+When an agent completes, trust its output. Don't re-implement what it already did."#,
         work_dir = work_dir.display(),
     )
 }
@@ -139,7 +128,6 @@ pub fn teammate_system_prompt(
 - `web_search` — Search the public web for current information
 - `run_command` — Run shell commands in output directory
 - `read_memory` / `write_memory` / `list_memory` / `search_memory` / `delete_memory` — Persistent memory (survives across sessions)
-- `get_task_context` / `list_completed_tasks` — See what other agents did
 
 ## Your Task
 {title}
@@ -149,12 +137,11 @@ Target file: {target_file}
 
 ## Approach
 1. Read only files relevant to this task (avoid broad repo scans)
-2. Check what other agents already produced only when needed
-3. Use memory for shared patterns and conventions
-4. Write output using `write_file`
-5. Prefer editing only `Target file` unless task instructions require additional files
-6. Verify output with focused commands (for example, manifest-path or file-scoped checks)
-7. Respond with a brief summary"#,
+2. Use memory for shared patterns and conventions
+3. Write output using `write_file`
+4. Prefer editing only `Target file` unless task instructions require additional files
+5. Verify output with focused commands (for example, manifest-path or file-scoped checks)
+6. Respond with a brief summary"#,
         source = source_root.display(),
         output = work_dir.display(),
         title = task.title,
@@ -207,9 +194,9 @@ pub fn subagent_system_prompt(
 - Working directory: {work_dir}
 
 ## Important
-- You are a subagent running in an isolated context window.
+- You are an agent running in an isolated context window.
 - Complete the delegated task and return a concise result summary.
-- You CANNOT spawn other subagents or agent teams.
+- You CANNOT spawn other agents.
 - Be thorough but efficient — your results will be returned to the parent agent."#,
         custom_prompt = custom_prompt,
         source = source_root.display(),
@@ -241,21 +228,6 @@ pub fn plan_mode_prompt(system_prompt: &str, task: &Task) -> String {
          Task: {title}\n{description}",
         title = task.title,
         description = task.description,
-    )
-}
-
-/// System prompt for the team lead when reviewing a teammate's plan.
-pub fn plan_review_system_prompt() -> &'static str {
-    "You are a technical lead reviewing implementation plans."
-}
-
-/// User message the team lead sends when reviewing a plan.
-pub fn plan_review_user_prompt(task_id: &uuid::Uuid, plan: &str) -> String {
-    format!(
-        "A teammate submitted this implementation plan for task '{task_id}'.\n\n\
-         Plan:\n{plan}\n\n\
-         Evaluate this plan. If it's reasonable and complete, respond with exactly: APPROVED\n\
-         If it needs changes, respond with: REJECTED: <your feedback>",
     )
 }
 
@@ -353,8 +325,7 @@ mod tests {
         let prompt = cli_system_prompt(&dir);
         assert!(prompt.contains("/tmp/workspace"));
         assert!(prompt.contains("read_file"));
-        assert!(prompt.contains("spawn_agent_team"));
-        assert!(prompt.contains("spawn_subagent"));
+        assert!(prompt.contains("agent"));
         assert!(prompt.contains("enter_plan_mode"));
         assert!(prompt.contains("exit_plan_mode"));
         assert!(prompt.contains("enter_ultraplan"));
@@ -400,7 +371,7 @@ mod tests {
         assert!(p.starts_with("Custom role here."));
         assert!(p.contains("/src"));
         assert!(p.contains("/work"));
-        assert!(p.contains("CANNOT spawn other subagents"));
+        assert!(p.contains("CANNOT spawn other agents"));
     }
 
     #[test]
@@ -418,20 +389,6 @@ mod tests {
         assert!(p.contains("PLAN MODE"));
         assert!(p.contains(&task.title));
         assert!(p.contains(&task.description));
-    }
-
-    #[test]
-    fn plan_review_prompts_are_stable() {
-        assert_eq!(
-            plan_review_system_prompt(),
-            "You are a technical lead reviewing implementation plans."
-        );
-        let tid = uuid::Uuid::new_v4();
-        let msg = plan_review_user_prompt(&tid, "Step 1. Step 2.");
-        assert!(msg.contains(&tid.to_string()));
-        assert!(msg.contains("Step 1. Step 2."));
-        assert!(msg.contains("APPROVED"));
-        assert!(msg.contains("REJECTED"));
     }
 
     #[test]

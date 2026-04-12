@@ -1,11 +1,11 @@
-/// A result delivered from a background agent (subagent or team) back to the
+/// A result delivered from a background agent (subagent) back to the
 /// parent agent's conversation.  The agent loop drains these before each LLM
 /// call and injects them as user-role messages so the model can reference them.
 #[derive(Debug, Clone)]
 pub struct BackgroundResult {
-    /// Human-readable name (e.g. "explore", "backend-team").
+    /// Human-readable name (e.g. "explore").
     pub name: String,
-    /// Whether this was a subagent or a team.
+    /// The kind of background result.
     pub kind: BackgroundResultKind,
     /// The final content / summary produced by the background agent.
     pub content: String,
@@ -16,12 +16,8 @@ pub struct BackgroundResult {
 #[derive(Debug, Clone)]
 pub enum BackgroundResultKind {
     SubAgent,
-    AgentTeam,
     /// Partial/intermediate result from a running subagent.
     SubAgentPartial,
-    /// A single teammate within a team completed its task.
-    /// Delivered as tasks finish so the parent agent can see progress.
-    TeamTaskComplete,
     /// A compaction summary produced by an off-loop summarization subagent.
     /// `target_window_start` / `target_window_end` mark the range of messages
     /// that should be replaced by the summary (half-open interval
@@ -81,9 +77,7 @@ mod tests {
     fn all_kinds_are_cloneable() {
         for k in [
             BackgroundResultKind::SubAgent,
-            BackgroundResultKind::AgentTeam,
             BackgroundResultKind::SubAgentPartial,
-            BackgroundResultKind::TeamTaskComplete,
         ] {
             let _ = k.clone();
         }

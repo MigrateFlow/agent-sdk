@@ -12,7 +12,6 @@ doctest = false
 [dependencies]
 sdk-core = { workspace = true }
 sdk-llm = { workspace = true }
-sdk-task = { workspace = true }
 sdk-tools = { workspace = true }
 sdk-protocols = { workspace = true }
 tokio = { workspace = true }

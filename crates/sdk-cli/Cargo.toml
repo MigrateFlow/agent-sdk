@@ -16,7 +16,6 @@ sdk-llm = { workspace = true }
 sdk-agent = { workspace = true }
 sdk-tools = { workspace = true }
 sdk-protocols = { workspace = true }
-sdk-task = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }

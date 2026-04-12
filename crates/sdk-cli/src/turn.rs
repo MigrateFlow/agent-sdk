@@ -21,7 +21,7 @@ use crate::display::{print_task_list, truncate};
 use crate::permission::PermissionState;
 use crate::format::{
     format_duration, format_result_preview, format_tool_label,
-    lang_hint, print_team_plan, print_team_result_summary, truncate_tool_result,
+    lang_hint, truncate_tool_result,
     CyclingSpinner,
 };
 use crate::mode_tools::ModeState;
@@ -87,9 +87,7 @@ pub async fn run_turn(
         // Drain background results
         while let Ok(result) = background_rx.try_recv() {
             let kind_label = match &result.kind {
-                BackgroundResultKind::SubAgent => "subagent",
-                BackgroundResultKind::AgentTeam => "agent team",
-                BackgroundResultKind::TeamTaskComplete => "teammate",
+                BackgroundResultKind::SubAgent => "agent",
                 BackgroundResultKind::CompactionSummary { .. }
                 | BackgroundResultKind::SubAgentPartial => { continue; }
             };
@@ -340,11 +338,6 @@ pub async fn run_turn(
                                 eprintln!("  {} {}", style("├").cyan(), label);
                             }
 
-                        // spawn_agent_team: label + team plan below
-                        } else if tc.function.name == "spawn_agent_team" {
-                            eprintln!("  {} {}", style("├").cyan(), label);
-                            print_team_plan(&tc.function.arguments);
-
                         // All other tools: compact inline display
                         } else {
                             let connector = if is_last_tc { "└" } else { "├" };
@@ -398,9 +391,7 @@ pub async fn run_turn(
                             eprintln!("    {}{}", style(&preview).dim(), style(&timing).dim());
                         }
 
-                        if tc.function.name == "spawn_agent_team" {
-                            print_team_result_summary(&result_content);
-                        } else if tc.function.name == "update_task_list" {
+                        if tc.function.name == "update_task_list" {
                             let current = tasks.lock().expect("task list mutex poisoned").clone();
                             print_task_list(&current);
                         }
