@@ -45,6 +45,11 @@ impl AgentPaths {
         self.project_config_dir().join("mcp.json")
     }
 
+    /// Path to the per-project LSP server manifest (`.agent/lsp.json`).
+    pub fn project_lsp_config_path(&self) -> PathBuf {
+        self.project_config_dir().join("lsp.json")
+    }
+
     pub fn user_root_dir(&self) -> PathBuf {
         self.home_dir.clone()
     }

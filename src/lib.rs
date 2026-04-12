@@ -11,6 +11,7 @@ pub mod prompts;
 pub mod storage;
 pub mod mcp;
 pub mod cli;
+pub mod lsp;
 
 // Convenience re-exports
 pub use error::{AgentId, TaskId, SdkError, SdkResult};
@@ -33,3 +34,4 @@ pub use llm::create_client;
 pub use storage::AgentPaths;
 pub use mcp::{McpClient, McpConfig, McpServerSpec};
 pub use cli::commands::{CommandContext, CommandOutcome, SlashCommand, SlashCommandRegistry};
+pub use lsp::{ChildLspClient, LspClient, LspConfig, LspManager, ServerSpec};

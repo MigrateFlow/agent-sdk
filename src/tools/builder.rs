@@ -16,12 +16,17 @@ use crate::traits::tool::Tool;
 use super::command_tools::RunCommandTool;
 use super::context_tools::{GetTaskContextTool, ListCompletedTasksTool};
 use super::fs_tools::{ListDirectoryTool, ReadFileTool, WriteFileTool};
+use super::lsp_tools::{
+    LspDocumentSymbolsTool, LspFindReferencesTool, LspGotoDefinitionTool, SharedLspManager,
+};
 use super::memory_tools::{ListMemoryTool, ReadMemoryTool, WriteMemoryTool};
 use super::registry::ToolRegistry;
 use super::search_tools::SearchFilesTool;
 use super::subagent_tools::SpawnSubAgentTool;
 use super::team_tools::SpawnAgentTeamTool;
 use super::web_tools::WebSearchTool;
+use crate::lsp::{work_dir_to_root_uri, LspConfig, LspManager};
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Default)]
 pub enum CommandToolPolicy {
@@ -187,6 +192,61 @@ impl DefaultToolsetBuilder {
             event_tx: config.event_tx,
             registry: config.registry,
             background_tx: config.background_tx,
+        });
+        self
+    }
+
+    /// Register the three LSP code-intelligence tools. Reads the LSP
+    /// manifest from `manifest_path`. If the manifest is missing, this is a
+    /// no-op that logs at debug level; a malformed manifest is also logged
+    /// and skipped so the CLI stays usable when the file is broken.
+    pub fn add_lsp_tools(mut self, manifest_path: PathBuf, work_dir: PathBuf) -> Self {
+        if !manifest_path.exists() {
+            tracing::debug!(
+                path = %manifest_path.display(),
+                "LSP manifest missing; skipping LSP tool registration"
+            );
+            return self;
+        }
+        let config = match LspConfig::load(&manifest_path) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!(
+                    path = %manifest_path.display(),
+                    error = %e,
+                    "Failed to parse LSP manifest; skipping LSP tool registration"
+                );
+                return self;
+            }
+        };
+        if config.is_empty() {
+            tracing::debug!("LSP manifest is empty; skipping LSP tool registration");
+            return self;
+        }
+        let root_uri = match work_dir_to_root_uri(&work_dir) {
+            Ok(uri) => uri,
+            Err(e) => {
+                tracing::warn!(error = %e, "Could not build LSP root URI; skipping LSP tools");
+                return self;
+            }
+        };
+        let manager: SharedLspManager = Arc::new(Mutex::new(LspManager::new(config, root_uri)));
+        // Use `work_dir` as source_root when no explicit root is available.
+        let source_root = work_dir.clone();
+        self.register(LspGotoDefinitionTool {
+            manager: manager.clone(),
+            work_dir: work_dir.clone(),
+            source_root: source_root.clone(),
+        });
+        self.register(LspFindReferencesTool {
+            manager: manager.clone(),
+            work_dir: work_dir.clone(),
+            source_root: source_root.clone(),
+        });
+        self.register(LspDocumentSymbolsTool {
+            manager,
+            work_dir,
+            source_root,
         });
         self
     }

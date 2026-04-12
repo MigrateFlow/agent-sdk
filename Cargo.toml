@@ -72,5 +72,8 @@ indicatif = "0.17"
 dotenvy = "0.15"
 dirs = "5"
 
+# Language Server Protocol (types only, transport is handled by this crate)
+lsp-types = "0.95"
+
 [dev-dependencies]
 tempfile = "3"
