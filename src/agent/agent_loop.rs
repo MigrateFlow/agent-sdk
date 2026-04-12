@@ -1,3 +1,6 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -29,12 +32,35 @@ pub struct BackgroundResult {
 pub enum BackgroundResultKind {
     SubAgent,
     AgentTeam,
+    /// A compaction summary produced by an off-loop summarization subagent.
+    /// `target_window_start` / `target_window_end` mark the range of messages
+    /// that should be replaced by the summary (half-open interval
+    /// `[start, end)`). `window_digest` is a hash of the original window used
+    /// to detect if intervening writes have shifted the target range — in
+    /// that case the summary is dropped.
+    CompactionSummary {
+        target_window_start: usize,
+        target_window_end: usize,
+        window_digest: u64,
+        strategy: String,
+    },
 }
 
 const CHARS_PER_ESTIMATED_TOKEN: usize = 4;
 const DEFAULT_MAX_CONTEXT_TOKENS: usize = 200_000;
 const MAX_TOOL_RESULT_CHARS: usize = 12_000;
 const COMPACT_KEEP_RECENT: usize = 10;
+
+/// System prompt used when spawning a background summarization subagent.
+const SUMMARIZER_SYSTEM: &str =
+    "You are a conversation summarizer. Produce a concise, faithful summary of \
+     the provided conversation window. Preserve decisions, intents, entities, \
+     file paths, tool results, and open questions. Prefer bullet points. \
+     Do not invent information. Do not include preambles like \"Here is a summary\".";
+
+/// Overflow ratio above which summarization is warranted even when the
+/// configured strategy is not explicitly aggressive.
+const SUMMARIZATION_OVERFLOW_RATIO: f64 = 1.8;
 
 #[derive(Debug)]
 pub struct AgentLoopResult {
@@ -120,6 +146,14 @@ pub struct AgentLoop {
     /// Receives results from background subagents / teams.
     /// Drained before each LLM call and injected as user messages.
     background_rx: Option<UnboundedReceiver<BackgroundResult>>,
+    /// Sender paired with `background_rx`; retained so the loop can dispatch
+    /// its own background work (e.g. memory consolidation summarization).
+    background_tx: Option<UnboundedSender<BackgroundResult>>,
+    /// Guards against spawning a second in-flight compaction-summary task
+    /// while one is still running. Set to `true` when a summarization task
+    /// is spawned; cleared by that task when it terminates (successfully or
+    /// not).
+    compaction_in_flight: Arc<AtomicBool>,
 }
 
 impl AgentLoop {
@@ -144,6 +178,8 @@ impl AgentLoop {
             event_tx: None,
             compaction_strategy: CompactionStrategy::default(),
             background_rx: None,
+            background_tx: None,
+            compaction_in_flight: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -186,6 +222,8 @@ impl AgentLoop {
             event_tx: None,
             compaction_strategy: CompactionStrategy::default(),
             background_rx: None,
+            background_tx: None,
+            compaction_in_flight: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -198,6 +236,24 @@ impl AgentLoop {
     /// each LLM call, mirroring Claude Code's background agent notification.
     pub fn set_background_rx(&mut self, rx: UnboundedReceiver<BackgroundResult>) {
         self.background_rx = Some(rx);
+    }
+
+    /// Install both ends of the background-result channel so the loop can
+    /// dispatch its own off-loop work (e.g. memory consolidation summaries).
+    /// The caller receives a clone of the sender for use in tools that also
+    /// need to post background results (subagents, teams, etc.).
+    pub fn install_background_channel(&mut self) -> UnboundedSender<BackgroundResult> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.background_rx = Some(rx);
+        self.background_tx = Some(tx.clone());
+        tx
+    }
+
+    /// Provide the loop with a sender clone for dispatching its own background
+    /// work. Use this when the channel was created externally and passed in
+    /// via [`set_background_rx`].
+    pub fn set_background_tx(&mut self, tx: UnboundedSender<BackgroundResult>) {
+        self.background_tx = Some(tx);
     }
 
     /// Get a clone of the current conversation messages.
@@ -381,6 +437,35 @@ impl AgentLoop {
             "Selected compaction strategy"
         );
 
+        // When the selected strategy warrants expensive LLM-backed
+        // summarization, we first run an inexpensive truncation pass so the
+        // immediate next LLM call stays within budget, THEN dispatch a
+        // background task that will produce a higher-quality summary of the
+        // resulting window. The summary is spliced in on a later
+        // `drain_background_results()` tick.
+        //
+        // Order matters: we snapshot/hash AFTER the inline truncation so the
+        // digest check at splice time sees a consistent window. Otherwise
+        // the inline mutation would invalidate the pending summary.
+        if self.should_summarize_in_background(&selected, size) {
+            self.compact_with_profile(CompactionProfile::AGGRESSIVE);
+            let after_inline = self.estimate_context_tokens();
+            debug!(
+                agent_id = %self.agent_id,
+                before = size,
+                after = after_inline,
+                "Context compacted (inline truncation)"
+            );
+            if self.try_spawn_summarization(&selected) {
+                debug!(
+                    agent_id = %self.agent_id,
+                    after_tokens = after_inline,
+                    "Background compaction summarization dispatched"
+                );
+            }
+            return;
+        }
+
         match selected {
             CompactionStrategy::Auto | CompactionStrategy::Default => {
                 self.compact_with_profile(CompactionProfile::DEFAULT)
@@ -413,6 +498,144 @@ impl AgentLoop {
             after = new_size,
             "Context compacted"
         );
+    }
+
+    /// Decide whether the strategy warrants an LLM-backed summarization.
+    /// We summarize when the configured/selected strategy is `Aggressive`
+    /// OR overflow is severe enough that a summary pays for itself.
+    fn should_summarize_in_background(
+        &self,
+        selected: &CompactionStrategy,
+        size: usize,
+    ) -> bool {
+        let overflow = size as f64 / self.max_context_tokens.max(1) as f64;
+        matches!(selected, CompactionStrategy::Aggressive)
+            || overflow >= SUMMARIZATION_OVERFLOW_RATIO
+    }
+
+    /// Attempt to spawn the background summarization task. Returns `false` if
+    /// the loop can't dispatch (no sender, another task already running,
+    /// window too small, or LLM client unavailable).
+    fn try_spawn_summarization(&self, selected: &CompactionStrategy) -> bool {
+        let tx = match self.background_tx.as_ref() {
+            Some(tx) => tx.clone(),
+            None => {
+                debug!(
+                    agent_id = %self.agent_id,
+                    "No background sender installed; skipping async summarization"
+                );
+                return false;
+            }
+        };
+
+        // Only one in-flight summarization at a time.
+        if self
+            .compaction_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            debug!(
+                agent_id = %self.agent_id,
+                "Compaction summarization already in flight; skipping spawn"
+            );
+            return false;
+        }
+
+        let window = match self.select_summarize_window() {
+            Some(w) => w,
+            None => {
+                self.compaction_in_flight.store(false, Ordering::Release);
+                return false;
+            }
+        };
+
+        let serialized = match serde_json::to_string(&self.messages[window.start..window.end]) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(
+                    agent_id = %self.agent_id,
+                    error = %e,
+                    "Failed to serialize compaction window; skipping"
+                );
+                self.compaction_in_flight.store(false, Ordering::Release);
+                return false;
+            }
+        };
+
+        let digest = hash_messages(&self.messages[window.start..window.end]);
+        let strategy_label = format!("{:?}", selected);
+        let llm_client = self.llm_client.clone();
+        let in_flight = self.compaction_in_flight.clone();
+        let agent_id = self.agent_id;
+        let start = window.start;
+        let end = window.end;
+
+        info!(
+            agent_id = %agent_id,
+            window_start = start,
+            window_end = end,
+            messages_in_window = end - start,
+            "Spawning background compaction summarization"
+        );
+
+        tokio::spawn(async move {
+            let user_msg = format!(
+                "Summarize the following conversation window. Return a single \
+                 block of text, no preamble.\n\n<window>\n{}\n</window>",
+                serialized
+            );
+            let result = llm_client.ask(SUMMARIZER_SYSTEM, &user_msg).await;
+            match result {
+                Ok((summary, tokens_used)) => {
+                    let payload = BackgroundResult {
+                        name: "compaction-summary".to_string(),
+                        kind: BackgroundResultKind::CompactionSummary {
+                            target_window_start: start,
+                            target_window_end: end,
+                            window_digest: digest,
+                            strategy: strategy_label,
+                        },
+                        content: summary,
+                        tokens_used,
+                    };
+                    if let Err(e) = tx.send(payload) {
+                        warn!(
+                            agent_id = %agent_id,
+                            error = %e,
+                            "Failed to deliver compaction summary (receiver dropped)"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        agent_id = %agent_id,
+                        error = %e,
+                        "Background compaction summarization failed"
+                    );
+                }
+            }
+            in_flight.store(false, Ordering::Release);
+        });
+
+        true
+    }
+
+    /// Choose the window of messages to summarize.
+    /// Returns `[start, end)` with `start >= 1` (never touches system message)
+    /// and `end <= len - keep_recent`. Returns `None` if the window would be
+    /// empty or degenerate.
+    fn select_summarize_window(&self) -> Option<SummarizeWindow> {
+        let total = self.messages.len();
+        let keep = COMPACT_KEEP_RECENT;
+        if total <= keep + 2 {
+            return None;
+        }
+        let start = 1usize;
+        let end = total - keep;
+        if end <= start {
+            return None;
+        }
+        Some(SummarizeWindow { start, end })
     }
 
     fn resolve_compaction_strategy(&self, size: usize) -> CompactionStrategy {
@@ -549,29 +772,117 @@ impl AgentLoop {
     /// Drain all pending background results and inject them as user messages.
     /// This mirrors Claude Code's behavior: when a background agent finishes,
     /// the parent agent is automatically notified with the result content.
+    /// Compaction summaries are spliced into the message history in place of
+    /// the summarized window rather than appended.
     fn drain_background_results(&mut self) {
-        let rx = match self.background_rx.as_mut() {
-            Some(rx) => rx,
-            None => return,
-        };
-
-        while let Ok(result) = rx.try_recv() {
-            let kind_label = match result.kind {
-                BackgroundResultKind::SubAgent => "subagent",
-                BackgroundResultKind::AgentTeam => "agent team",
-            };
-            let notification = format!(
-                "[Background {} '{}' completed — {} tokens]\n\n{}",
-                kind_label, result.name, result.tokens_used, result.content,
-            );
-            info!(
-                agent_id = %self.agent_id,
-                background_agent = %result.name,
-                tokens = result.tokens_used,
-                "Background agent result injected into conversation"
-            );
-            self.messages.push(ChatMessage::user(notification));
+        // Collect first, then process. This avoids holding `&mut rx` while we
+        // mutate `self.messages`.
+        let mut pending: Vec<BackgroundResult> = Vec::new();
+        if let Some(rx) = self.background_rx.as_mut() {
+            while let Ok(result) = rx.try_recv() {
+                pending.push(result);
+            }
         }
+
+        for result in pending {
+            let BackgroundResult { name, kind, content, tokens_used } = result;
+            match kind {
+                BackgroundResultKind::CompactionSummary {
+                    target_window_start,
+                    target_window_end,
+                    window_digest,
+                    strategy,
+                } => {
+                    self.apply_compaction_summary(
+                        content,
+                        target_window_start,
+                        target_window_end,
+                        window_digest,
+                        strategy,
+                    );
+                }
+                BackgroundResultKind::SubAgent | BackgroundResultKind::AgentTeam => {
+                    let kind_label = match kind {
+                        BackgroundResultKind::SubAgent => "subagent",
+                        BackgroundResultKind::AgentTeam => "agent team",
+                        BackgroundResultKind::CompactionSummary { .. } => unreachable!(),
+                    };
+                    let notification = format!(
+                        "[Background {} '{}' completed — {} tokens]\n\n{}",
+                        kind_label, name, tokens_used, content,
+                    );
+                    info!(
+                        agent_id = %self.agent_id,
+                        background_agent = %name,
+                        tokens = tokens_used,
+                        "Background agent result injected into conversation"
+                    );
+                    self.messages.push(ChatMessage::user(notification));
+                }
+            }
+        }
+    }
+
+    fn apply_compaction_summary(
+        &mut self,
+        summary: String,
+        start: usize,
+        end: usize,
+        expected_digest: u64,
+        strategy: String,
+    ) {
+        // Validate the splice is still sane against the current history.
+        if start == 0 || end > self.messages.len() || end <= start {
+            warn!(
+                agent_id = %self.agent_id,
+                start, end, len = self.messages.len(),
+                "Compaction summary indices out of range; dropping"
+            );
+            return;
+        }
+
+        // Confirm the window still matches what we summarized. If not, drop
+        // the summary — splicing stale content over fresher messages would
+        // corrupt history.
+        let actual_digest = hash_messages(&self.messages[start..end]);
+        if actual_digest != expected_digest {
+            warn!(
+                agent_id = %self.agent_id,
+                "Compaction summary window shifted under us; dropping summary"
+            );
+            return;
+        }
+
+        let messages_before = self.messages.len();
+        let chars_before: usize = self.messages[start..end].iter().map(|m| m.char_len()).sum();
+
+        let replacement = ChatMessage::system(format!(
+            "[Memory consolidation summary of messages {}..{}]\n\n{}",
+            start, end, summary
+        ));
+        self.messages.splice(start..end, std::iter::once(replacement));
+
+        let messages_after = self.messages.len();
+        let chars_after = self.messages[start].char_len();
+        let tokens_saved = chars_before
+            .saturating_sub(chars_after)
+            .div_ceil(CHARS_PER_ESTIMATED_TOKEN) as u64;
+
+        info!(
+            agent_id = %self.agent_id,
+            messages_before,
+            messages_after,
+            tokens_saved,
+            strategy = %strategy,
+            "Compaction summary spliced into history"
+        );
+
+        self.emit(AgentEvent::MemoryCompacted {
+            strategy,
+            messages_before,
+            messages_after,
+            tokens_saved,
+        });
     }
 
     fn emit(&self, event: AgentEvent) {
@@ -652,6 +963,46 @@ fn truncate(s: &str, max_len: usize) -> String {
     } else {
         format!("{}...", safe_prefix(s, max_len))
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SummarizeWindow {
+    start: usize,
+    end: usize,
+}
+
+/// Produce a stable digest for a slice of messages, used to detect whether
+/// a compaction summary's target window has shifted under intervening
+/// writes. Uses `DefaultHasher` which is stable within a single process run.
+fn hash_messages(messages: &[ChatMessage]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for msg in messages {
+        match msg {
+            ChatMessage::System { content } => {
+                "S".hash(&mut hasher);
+                content.hash(&mut hasher);
+            }
+            ChatMessage::User { content } => {
+                "U".hash(&mut hasher);
+                content.hash(&mut hasher);
+            }
+            ChatMessage::Assistant { content, tool_calls } => {
+                "A".hash(&mut hasher);
+                content.as_deref().unwrap_or("").hash(&mut hasher);
+                for tc in tool_calls {
+                    tc.id.hash(&mut hasher);
+                    tc.function.name.hash(&mut hasher);
+                    tc.function.arguments.hash(&mut hasher);
+                }
+            }
+            ChatMessage::Tool { tool_call_id, content } => {
+                "T".hash(&mut hasher);
+                tool_call_id.hash(&mut hasher);
+                content.hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
 }
 
 fn safe_prefix(s: &str, max_len: usize) -> &str {
