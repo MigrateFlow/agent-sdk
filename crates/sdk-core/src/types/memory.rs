@@ -75,3 +75,58 @@ pub struct MemoryEntry {
     pub written_by: AgentId,
     pub written_at: DateTime<Utc>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_is_reference() {
+        assert_eq!(MemoryType::default(), MemoryType::Reference);
+    }
+
+    #[test]
+    fn display_matches_snake_case() {
+        assert_eq!(MemoryType::User.to_string(), "user");
+        assert_eq!(MemoryType::Feedback.to_string(), "feedback");
+        assert_eq!(MemoryType::Project.to_string(), "project");
+        assert_eq!(MemoryType::Reference.to_string(), "reference");
+    }
+
+    #[test]
+    fn parse_is_case_insensitive_and_rejects_unknown() {
+        assert_eq!(MemoryType::parse("USER"), Some(MemoryType::User));
+        assert_eq!(MemoryType::parse("Feedback"), Some(MemoryType::Feedback));
+        assert_eq!(MemoryType::parse("project"), Some(MemoryType::Project));
+        assert_eq!(MemoryType::parse("Reference"), Some(MemoryType::Reference));
+        assert!(MemoryType::parse("other").is_none());
+        assert!(MemoryType::parse("").is_none());
+    }
+
+    #[test]
+    fn serde_roundtrip_entry_drops_value_field_on_write() {
+        // `value` is skip_serializing, so it never appears in the output JSON.
+        let entry = MemoryEntry {
+            key: "k".into(),
+            name: None,
+            description: None,
+            memory_type: MemoryType::default(),
+            content: "body".into(),
+            value: Some(serde_json::json!({"x": 1})),
+            written_by: uuid::Uuid::new_v4(),
+            written_at: chrono::Utc::now(),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert!(json.get("value").is_none());
+        // But deserializing a payload with value still populates the field.
+        let back: MemoryEntry = serde_json::from_value(serde_json::json!({
+            "key": "k",
+            "content": "",
+            "value": {"x": 1},
+            "written_by": uuid::Uuid::new_v4(),
+            "written_at": chrono::Utc::now(),
+        }))
+        .unwrap();
+        assert!(back.value.is_some());
+    }
+}

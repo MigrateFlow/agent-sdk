@@ -32,3 +32,56 @@ pub enum BackgroundResultKind {
         strategy: String,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn background_result_is_cloneable_and_debuggable() {
+        let r = BackgroundResult {
+            name: "n".into(),
+            kind: BackgroundResultKind::SubAgent,
+            content: "c".into(),
+            tokens_used: 1,
+        };
+        let cloned = r.clone();
+        assert_eq!(cloned.name, "n");
+        assert!(!format!("{:?}", r).is_empty());
+    }
+
+    #[test]
+    fn compaction_summary_carries_window_fields() {
+        let k = BackgroundResultKind::CompactionSummary {
+            target_window_start: 3,
+            target_window_end: 7,
+            window_digest: 0xdead_beef,
+            strategy: "lossy".into(),
+        };
+        match k {
+            BackgroundResultKind::CompactionSummary {
+                target_window_start,
+                target_window_end,
+                window_digest,
+                strategy,
+            } => {
+                assert_eq!(target_window_start, 3);
+                assert_eq!(target_window_end, 7);
+                assert_eq!(window_digest, 0xdead_beef);
+                assert_eq!(strategy, "lossy");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn all_kinds_are_cloneable() {
+        for k in [
+            BackgroundResultKind::SubAgent,
+            BackgroundResultKind::AgentTeam,
+            BackgroundResultKind::SubAgentPartial,
+        ] {
+            let _ = k.clone();
+        }
+    }
+}

@@ -132,3 +132,90 @@ pub struct TaskResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra: Option<serde_json::Value>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_sets_defaults() {
+        let t = Task::new("kind", "title", "desc", PathBuf::from("out.rs"));
+        assert_eq!(t.kind, "kind");
+        assert_eq!(t.title, "title");
+        assert_eq!(t.description, "desc");
+        assert_eq!(t.target_file, PathBuf::from("out.rs"));
+        assert_eq!(t.priority, 0);
+        assert_eq!(t.retry_count, 0);
+        assert_eq!(t.max_retries, 3);
+        assert!(t.dependencies.is_empty());
+        assert!(t.result.is_none());
+        assert!(matches!(t.status, TaskStatus::Pending));
+    }
+
+    #[test]
+    fn builder_methods_mutate_fields() {
+        let dep = Uuid::new_v4();
+        let ctx = serde_json::json!({"foo": 1});
+        let t = Task::new("k", "t", "d", PathBuf::from("f"))
+            .with_dependencies(vec![dep])
+            .with_priority(9)
+            .with_context(ctx.clone());
+        assert_eq!(t.dependencies, vec![dep]);
+        assert_eq!(t.priority, 9);
+        assert_eq!(t.context, ctx);
+    }
+
+    #[test]
+    fn status_classification_helpers() {
+        assert!(TaskStatus::Pending.is_pending());
+        assert!(!TaskStatus::Pending.is_completed());
+        assert!(!TaskStatus::Pending.is_failed());
+        assert_eq!(TaskStatus::Pending.assigned_agent(), None);
+
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+
+        let claimed = TaskStatus::Claimed {
+            agent_id: id,
+            at: now,
+        };
+        assert_eq!(claimed.assigned_agent(), Some(id));
+
+        let in_progress = TaskStatus::InProgress {
+            agent_id: id,
+            started_at: now,
+        };
+        assert_eq!(in_progress.assigned_agent(), Some(id));
+
+        let completed = TaskStatus::Completed {
+            agent_id: id,
+            completed_at: now,
+        };
+        assert!(completed.is_completed());
+        assert_eq!(completed.assigned_agent(), Some(id));
+
+        let failed = TaskStatus::Failed {
+            agent_id: id,
+            error: "e".into(),
+            failed_at: now,
+        };
+        assert!(failed.is_failed());
+        assert_eq!(failed.assigned_agent(), Some(id));
+
+        let blocked = TaskStatus::Blocked {
+            reason: "upstream".into(),
+        };
+        assert!(!blocked.is_pending());
+        assert!(!blocked.is_completed());
+        assert_eq!(blocked.assigned_agent(), None);
+    }
+
+    #[test]
+    fn task_serde_roundtrip() {
+        let t = Task::new("k", "t", "d", PathBuf::from("f")).with_priority(2);
+        let json = serde_json::to_string(&t).unwrap();
+        let back: Task = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, t.id);
+        assert_eq!(back.priority, 2);
+    }
+}

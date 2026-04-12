@@ -109,3 +109,76 @@ impl Default for HookRegistry {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct CountingHook {
+        calls: Arc<AtomicUsize>,
+        verdict: HookResult,
+    }
+
+    impl Hook for CountingHook {
+        fn on_event(&self, _event: &HookEvent) -> HookResult {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.verdict.clone()
+        }
+    }
+
+    fn sample_event() -> HookEvent {
+        HookEvent::PreLlmRequest { message_count: 7 }
+    }
+
+    #[test]
+    fn empty_registry_reports_empty_and_returns_continue() {
+        let reg = HookRegistry::new();
+        assert!(reg.is_empty());
+        assert!(matches!(reg.evaluate(&sample_event()), HookResult::Continue));
+
+        let def = HookRegistry::default();
+        assert!(def.is_empty());
+    }
+
+    #[test]
+    fn evaluate_runs_all_hooks_when_all_continue() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut reg = HookRegistry::new();
+        reg.add(CountingHook {
+            calls: counter.clone(),
+            verdict: HookResult::Continue,
+        });
+        reg.add(CountingHook {
+            calls: counter.clone(),
+            verdict: HookResult::Continue,
+        });
+        assert!(!reg.is_empty());
+        let result = reg.evaluate(&sample_event());
+        assert!(matches!(result, HookResult::Continue));
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn evaluate_short_circuits_on_first_rejection() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut reg = HookRegistry::new();
+        reg.add(CountingHook {
+            calls: counter.clone(),
+            verdict: HookResult::Reject {
+                feedback: "stop".into(),
+            },
+        });
+        // Second hook must not be invoked.
+        reg.add(CountingHook {
+            calls: counter.clone(),
+            verdict: HookResult::Continue,
+        });
+        match reg.evaluate(&sample_event()) {
+            HookResult::Reject { feedback } => assert_eq!(feedback, "stop"),
+            HookResult::Continue => panic!("expected Reject"),
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+}

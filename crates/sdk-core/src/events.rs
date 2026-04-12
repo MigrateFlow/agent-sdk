@@ -245,3 +245,216 @@ impl AgentEvent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn agent() -> AgentId {
+        Uuid::new_v4()
+    }
+
+    #[test]
+    fn agent_id_returns_some_for_agent_bearing_variants() {
+        let id = agent();
+        let tid = Uuid::new_v4();
+        let cases: Vec<AgentEvent> = vec![
+            AgentEvent::TeammateSpawned {
+                agent_id: id,
+                name: "n".into(),
+                worktree_path: None,
+            },
+            AgentEvent::TaskCreated {
+                agent_id: id,
+                name: "n".into(),
+                task_id: tid,
+                title: "t".into(),
+            },
+            AgentEvent::TaskStarted {
+                agent_id: id,
+                name: "n".into(),
+                task_id: tid,
+                title: "t".into(),
+            },
+            AgentEvent::Thinking {
+                agent_id: id,
+                name: "n".into(),
+                content: "c".into(),
+                iteration: 1,
+            },
+            AgentEvent::ToolCall {
+                agent_id: id,
+                name: "n".into(),
+                tool_name: "read".into(),
+                arguments: "{}".into(),
+                iteration: 1,
+            },
+            AgentEvent::ToolResult {
+                agent_id: id,
+                name: "n".into(),
+                tool_name: "read".into(),
+                result_preview: "ok".into(),
+                iteration: 1,
+            },
+            AgentEvent::TaskCompleted {
+                agent_id: id,
+                name: "n".into(),
+                task_id: tid,
+                tokens_used: 0,
+                iterations: 1,
+                tool_calls: 0,
+            },
+            AgentEvent::TaskFailed {
+                agent_id: id,
+                name: "n".into(),
+                task_id: tid,
+                error: "oops".into(),
+            },
+            AgentEvent::PlanSubmitted {
+                agent_id: id,
+                name: "n".into(),
+                task_id: tid,
+                plan_preview: "p".into(),
+            },
+            AgentEvent::PlanApproved {
+                agent_id: id,
+                name: "n".into(),
+                task_id: tid,
+            },
+            AgentEvent::PlanRejected {
+                agent_id: id,
+                name: "n".into(),
+                task_id: tid,
+                feedback: "f".into(),
+            },
+            AgentEvent::TeammateIdle {
+                agent_id: id,
+                name: "n".into(),
+                tasks_completed: 0,
+            },
+            AgentEvent::ShutdownRequested {
+                agent_id: id,
+                name: "n".into(),
+            },
+            AgentEvent::ShutdownAccepted {
+                agent_id: id,
+                name: "n".into(),
+            },
+            AgentEvent::ShutdownRejected {
+                agent_id: id,
+                name: "n".into(),
+                reason: "busy".into(),
+            },
+            AgentEvent::AgentShutdown {
+                agent_id: id,
+                name: "n".into(),
+            },
+            AgentEvent::SubAgentSpawned {
+                agent_id: id,
+                name: "n".into(),
+                description: "d".into(),
+            },
+            AgentEvent::SubAgentProgress {
+                agent_id: id,
+                name: "n".into(),
+                iteration: 1,
+                max_turns: 10,
+                current_tool: None,
+                tokens_so_far: 0,
+            },
+            AgentEvent::SubAgentCompleted {
+                agent_id: id,
+                name: "n".into(),
+                tokens_used: 0,
+                iterations: 1,
+                tool_calls: 0,
+                final_content: "done".into(),
+                worktree_path: None,
+                branch: None,
+            },
+            AgentEvent::SubAgentFailed {
+                agent_id: id,
+                name: "n".into(),
+                error: "boom".into(),
+            },
+            AgentEvent::SubAgentUpdate {
+                agent_id: id,
+                name: "n".into(),
+                iteration: 1,
+                content: "c".into(),
+                is_final: false,
+            },
+        ];
+        for e in &cases {
+            assert_eq!(e.agent_id(), Some(id), "agent_id for {e:?}");
+            assert_eq!(e.agent_name(), Some("n"), "agent_name for {e:?}");
+        }
+    }
+
+    #[test]
+    fn teammate_message_uses_from_and_from_name() {
+        let from = agent();
+        let to = agent();
+        let e = AgentEvent::TeammateMessage {
+            from,
+            from_name: "sender".into(),
+            to,
+            content_preview: "hi".into(),
+        };
+        assert_eq!(e.agent_id(), Some(from));
+        assert_eq!(e.agent_name(), Some("sender"));
+    }
+
+    #[test]
+    fn variants_without_agent_return_none() {
+        let events = [
+            AgentEvent::TeamSpawned { teammate_count: 3 },
+            AgentEvent::HookRejected {
+                event_name: "pre".into(),
+                feedback: "no".into(),
+            },
+            AgentEvent::MemoryCompacted {
+                strategy: "sum".into(),
+                messages_before: 10,
+                messages_after: 2,
+                tokens_saved: 100,
+            },
+            AgentEvent::Custom {
+                name: "x".into(),
+                data: serde_json::json!({}),
+            },
+        ];
+        for e in &events {
+            assert!(e.agent_id().is_none());
+            assert!(e.agent_name().is_none());
+        }
+    }
+
+    #[test]
+    fn serialization_uses_snake_case_tagged_type() {
+        let e = AgentEvent::TeamSpawned { teammate_count: 2 };
+        let json = serde_json::to_value(&e).unwrap();
+        assert_eq!(json["type"], "team_spawned");
+        assert_eq!(json["teammate_count"], 2);
+    }
+
+    #[test]
+    fn serialization_omits_none_worktree_path() {
+        let e = AgentEvent::TeammateSpawned {
+            agent_id: agent(),
+            name: "n".into(),
+            worktree_path: None,
+        };
+        let json = serde_json::to_value(&e).unwrap();
+        assert!(json.get("worktree_path").is_none());
+
+        let e2 = AgentEvent::TeammateSpawned {
+            agent_id: agent(),
+            name: "n".into(),
+            worktree_path: Some("/tmp/wt".into()),
+        };
+        let json2 = serde_json::to_value(&e2).unwrap();
+        assert_eq!(json2["worktree_path"], "/tmp/wt");
+    }
+}

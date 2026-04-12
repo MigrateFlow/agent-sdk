@@ -196,3 +196,167 @@ fn resolve_common_dir(gitdir: &Path) -> Option<PathBuf> {
         gitdir.join(path)
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_paths() -> (tempfile::TempDir, AgentPaths) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AgentPaths::for_work_dir(dir.path()).expect("build paths");
+        (dir, paths)
+    }
+
+    #[test]
+    fn for_work_dir_canonicalizes_existing_path() {
+        let (dir, paths) = make_paths();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        assert_eq!(paths.project_config_dir(), canonical.join(AGENT_DIR));
+    }
+
+    #[test]
+    fn for_work_dir_joins_nonexistent_path_to_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("not_yet_here");
+        let paths = AgentPaths::for_work_dir(&missing).unwrap();
+        // work_dir should have been joined with cwd since missing didn't exist.
+        // Since `dir.path()` is absolute, the join just yields `missing` itself.
+        assert!(paths.project_config_dir().starts_with(missing));
+    }
+
+    #[test]
+    fn project_paths_are_under_work_dir_agent_dir() {
+        let (_d, paths) = make_paths();
+        let base = paths.project_config_dir();
+        assert_eq!(paths.project_settings_path(), base.join("settings.json"));
+        assert_eq!(
+            paths.project_local_settings_path(),
+            base.join("settings.local.json")
+        );
+        assert_eq!(paths.project_mcp_config_path(), base.join("mcp.json"));
+        assert_eq!(paths.project_lsp_config_path(), base.join("lsp.json"));
+    }
+
+    #[test]
+    fn user_paths_live_under_home_agent_dir() {
+        let (_d, paths) = make_paths();
+        let home = dirs::home_dir().unwrap().join(AGENT_DIR);
+        assert_eq!(paths.user_root_dir(), home);
+        assert_eq!(paths.user_settings_path(), home.join("settings.json"));
+        assert_eq!(paths.projects_dir(), home.join("projects"));
+        assert_eq!(paths.teams_dir(), home.join("teams"));
+        assert_eq!(paths.tasks_dir(), home.join("tasks"));
+    }
+
+    #[test]
+    fn project_state_layout_matches_spec() {
+        let (_d, paths) = make_paths();
+        let root = paths.projects_dir().join(paths.project_key());
+        assert_eq!(paths.project_state_dir(), root);
+        assert_eq!(paths.project_tasks_dir(), root.join("tasks"));
+        assert_eq!(paths.project_mailbox_dir(), root.join("mailbox"));
+        assert_eq!(paths.project_memory_dir(), root.join("memory"));
+        assert_eq!(paths.project_sessions_dir(), root.join("sessions"));
+        assert_eq!(
+            paths.cli_session_path(),
+            root.join("sessions").join("cli-session.json")
+        );
+    }
+
+    #[test]
+    fn team_paths_compose_correctly() {
+        let (_d, paths) = make_paths();
+        let name = "team-abc";
+        let team = paths.teams_dir().join(name);
+        assert_eq!(paths.team_dir(name), team);
+        assert_eq!(paths.team_config_path(name), team.join("config.json"));
+        assert_eq!(paths.team_mailbox_dir(name), team.join("mailbox"));
+        assert_eq!(paths.team_memory_dir(name), team.join("memory"));
+        assert_eq!(paths.team_tasks_dir(name), paths.tasks_dir().join(name));
+    }
+
+    #[test]
+    fn new_team_name_is_deterministic_prefix_unique_suffix() {
+        let (_d, paths) = make_paths();
+        let a = paths.new_team_name();
+        let b = paths.new_team_name();
+        assert_ne!(a, b);
+        assert!(a.starts_with(paths.project_key()));
+        // Suffix should be 8 hex chars after the trailing dash.
+        let suffix = a.rsplit('-').next().unwrap();
+        assert_eq!(suffix.len(), 8);
+        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn project_key_contains_slug_and_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        // Directory name includes non-alphanumeric chars.
+        let custom = dir.path().join("weird name!");
+        std::fs::create_dir(&custom).unwrap();
+        let paths = AgentPaths::for_work_dir(&custom).unwrap();
+        let key = paths.project_key();
+        // Non-alnum chars replaced with `-`, so "weird name!" -> "weird-name-"
+        assert!(key.starts_with("weird-name-"), "key was {key}");
+        // Ends with 16 hex chars.
+        let hash = key.rsplit('-').next().unwrap();
+        assert_eq!(hash.len(), 16);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn different_work_dirs_get_different_project_keys() {
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let p1 = AgentPaths::for_work_dir(d1.path()).unwrap();
+        let p2 = AgentPaths::for_work_dir(d2.path()).unwrap();
+        assert_ne!(p1.project_key(), p2.project_key());
+    }
+
+    #[test]
+    fn git_dir_parent_shares_project_key_across_children() {
+        // Simulate a git repo by placing a `.git` dir at the root; two subdirs
+        // should resolve to the same project_key.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let a = dir.path().join("sub_a");
+        let b = dir.path().join("sub_b");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+
+        let pa = AgentPaths::for_work_dir(&a).unwrap();
+        let pb = AgentPaths::for_work_dir(&b).unwrap();
+        assert_eq!(pa.project_key(), pb.project_key());
+    }
+
+    #[test]
+    fn git_file_gitdir_and_commondir_resolve_shared_key() {
+        // Simulate a git worktree: work_dir/.git is a file pointing to a
+        // gitdir that has a commondir pointing to the main repo.
+        let root = tempfile::tempdir().unwrap();
+        let main_git = root.path().join("mainrepo/.git");
+        std::fs::create_dir_all(&main_git).unwrap();
+        let worktree_gitdir = root.path().join("mainrepo/.git/worktrees/wt1");
+        std::fs::create_dir_all(&worktree_gitdir).unwrap();
+        // commondir -> relative ../../
+        std::fs::write(worktree_gitdir.join("commondir"), "../../").unwrap();
+
+        let worktree = root.path().join("wt1");
+        std::fs::create_dir(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!(
+                "gitdir: {}\n",
+                worktree_gitdir.display()
+            ),
+        )
+        .unwrap();
+
+        // The main repo itself
+        let main_paths = AgentPaths::for_work_dir(&root.path().join("mainrepo")).unwrap();
+        // The linked worktree should resolve the same common dir, giving the
+        // same project_key.
+        let wt_paths = AgentPaths::for_work_dir(&worktree).unwrap();
+        assert_eq!(main_paths.project_key(), wt_paths.project_key());
+    }
+}
