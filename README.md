@@ -342,7 +342,7 @@ let lead = TeamLead {
     event_tx: None,
     hooks: Arc::new(HookRegistry::new()),
     teammate_specs: vec![
-        TeammateSpec { name: "worker-1".into(), prompt: "...".into(), require_plan_approval: false },
+        TeammateSpec { name: "worker-1".into(), prompt: "...".into(), require_plan_approval: false, isolation: None },
     ],
 };
 let summary = lead.run().await?;

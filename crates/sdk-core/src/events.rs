@@ -12,6 +12,8 @@ pub enum AgentEvent {
     TeammateSpawned {
         agent_id: AgentId,
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree_path: Option<String>,
     },
 
     // --- Task lifecycle ---

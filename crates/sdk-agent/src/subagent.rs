@@ -488,6 +488,7 @@ pub fn builtin_subagents() -> Vec<SubAgentDef> {
             max_turns: 20,
             max_context_tokens: 200_000,
             background: false,
+            isolation: IsolationMode::None,
         },
         SubAgentDef {
             name: "test-runner".to_string(),
@@ -511,6 +512,7 @@ pub fn builtin_subagents() -> Vec<SubAgentDef> {
             max_turns: 15,
             max_context_tokens: 200_000,
             background: false,
+            isolation: IsolationMode::None,
         },
         SubAgentDef {
             name: "refactor".to_string(),
@@ -524,6 +526,7 @@ pub fn builtin_subagents() -> Vec<SubAgentDef> {
             max_turns: 25,
             max_context_tokens: 200_000,
             background: false,
+            isolation: IsolationMode::None,
         },
     ]
 }
