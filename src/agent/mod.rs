@@ -1,6 +1,7 @@
 pub mod agent_loop;
 pub mod compaction;
 pub mod context;
+pub mod cost;
 pub mod events;
 pub mod handle;
 pub mod hooks;

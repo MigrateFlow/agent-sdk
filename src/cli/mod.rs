@@ -11,6 +11,6 @@ pub mod session;
 
 pub use commands::{
     ClearCommand, CommandContext, CommandOutcome, CompactCommand, CostCommand, HelpCommand,
-    QuitCommand, SlashCommand, SlashCommandRegistry, TasksCommand,
+    QuitCommand, SlashCommand, SlashCommandRegistry, StatusCommand, TasksCommand,
 };
 pub use session::{CliSessionData, CliTask};

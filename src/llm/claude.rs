@@ -9,6 +9,7 @@ use tracing::debug;
 use crate::config::LlmConfig;
 use crate::error::{SdkError, SdkResult};
 use crate::types::chat::{ChatMessage, FunctionCall, ToolCall};
+use crate::types::usage::TokenUsage;
 use crate::traits::llm_client::LlmClient;
 use crate::traits::tool::ToolDefinition;
 
@@ -81,17 +82,25 @@ struct ApiResponse {
     #[allow(dead_code)]
     id: String,
     content: Vec<ContentBlock>,
-    #[allow(dead_code)]
     model: String,
     #[allow(dead_code)]
     stop_reason: Option<String>,
     usage: Usage,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 struct Usage {
+    #[serde(default)]
     input_tokens: u64,
+    #[serde(default)]
     output_tokens: u64,
+    /// Prompt-cache write tokens (Anthropic-only). Optional: older responses
+    /// and other providers omit this field.
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u64>,
+    /// Prompt-cache read (hit) tokens (Anthropic-only). Optional.
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
 }
 
 impl Usage {
@@ -411,6 +420,15 @@ impl LlmClient for ClaudeClient {
         messages: &[ChatMessage],
         tools: &[ToolDefinition],
     ) -> SdkResult<(ChatMessage, u64)> {
+        let (msg, usage) = self.chat_with_usage(messages, tools).await?;
+        Ok((msg, usage.input_tokens + usage.output_tokens))
+    }
+
+    async fn chat_with_usage(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDefinition],
+    ) -> SdkResult<(ChatMessage, TokenUsage)> {
         let (system_prompt, anthropic_msgs) = chat_messages_to_anthropic(messages);
         let anthropic_tools = tool_defs_to_anthropic(tools);
 
@@ -423,8 +441,17 @@ impl LlmClient for ClaudeClient {
         };
 
         let response = self.send_request(&request).await?;
-        let tokens = response.usage.total_tokens();
+        let usage = TokenUsage {
+            input_tokens: response.usage.input_tokens,
+            output_tokens: response.usage.output_tokens,
+            cache_creation_input_tokens: response
+                .usage
+                .cache_creation_input_tokens
+                .unwrap_or(0),
+            cache_read_input_tokens: response.usage.cache_read_input_tokens.unwrap_or(0),
+            model: response.model.clone(),
+        };
         let chat_msg = anthropic_response_to_chat(&response);
-        Ok((chat_msg, tokens))
+        Ok((chat_msg, usage))
     }
 }

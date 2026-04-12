@@ -5,8 +5,8 @@
 //! trait and receives a [`CommandContext`] exposing the mutable pieces of
 //! REPL state it may need to read or mutate.
 //!
-//! The six built-ins (`/help`, `/clear`, `/compact`, `/tasks`, `/cost`,
-//! `/quit`) are registered by [`SlashCommandRegistry::builtin`], and library
+//! The built-ins (`/help`, `/clear`, `/compact`, `/tasks`, `/cost`,
+//! `/status`, `/quit`) are registered by [`SlashCommandRegistry::builtin`], and library
 //! consumers may register additional commands via
 //! [`SlashCommandRegistry::register`].
 
@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use console::style;
 
 use crate::cli::compaction::compact_conversation;
-use crate::cli::display::{display_path, format_token_count, print_task_list};
+use crate::cli::display::{display_path, format_token_count, print_task_list, truncate};
 use crate::cli::session::{save_session, CliTask};
 use crate::error::{SdkError, SdkResult};
 use crate::storage::AgentPaths;
@@ -115,7 +115,7 @@ impl SlashCommandRegistry {
         self.commands.push(cmd);
     }
 
-    /// Build a registry containing all six built-in REPL commands.
+    /// Build a registry containing the built-in REPL commands.
     pub fn builtin() -> Self {
         let mut r = Self::new();
         r.register(Arc::new(HelpCommand));
@@ -123,6 +123,7 @@ impl SlashCommandRegistry {
         r.register(Arc::new(CompactCommand));
         r.register(Arc::new(TasksCommand));
         r.register(Arc::new(CostCommand));
+        r.register(Arc::new(StatusCommand));
         r.register(Arc::new(QuitCommand));
         r
     }
@@ -343,7 +344,7 @@ impl SlashCommand for TasksCommand {
     }
 }
 
-/// `/cost` — show session stats (aliased as `/status`).
+/// `/cost` — show recorded cost usage from `cost.jsonl`.
 pub struct CostCommand;
 
 #[async_trait]
@@ -353,11 +354,35 @@ impl SlashCommand for CostCommand {
     }
 
     fn help(&self) -> &str {
-        "show session stats & token usage"
+        "show recorded token cost usage"
     }
 
-    fn aliases(&self) -> &[&str] {
-        &["status"]
+    async fn execute(
+        &self,
+        ctx: &mut CommandContext<'_>,
+        _args: &str,
+    ) -> SdkResult<CommandOutcome> {
+        print_cost_summary(
+            ctx.session_path.as_path(),
+            *ctx.total_tokens,
+            *ctx.tool_calls,
+            *ctx.turns,
+        );
+        Ok(CommandOutcome::Continue)
+    }
+}
+
+/// `/status` — show the active session summary.
+pub struct StatusCommand;
+
+#[async_trait]
+impl SlashCommand for StatusCommand {
+    fn name(&self) -> &str {
+        "status"
+    }
+
+    fn help(&self) -> &str {
+        "show session stats & token usage"
     }
 
     async fn execute(
@@ -392,6 +417,93 @@ impl SlashCommand for CostCommand {
         eprintln!();
         Ok(CommandOutcome::Continue)
     }
+}
+
+fn print_cost_summary(
+    session_path: &Path,
+    session_tokens: u64,
+    session_tool_calls: usize,
+    session_turns: usize,
+) {
+    let cost_path = session_path
+        .parent()
+        .map(|p| p.join("cost.jsonl"))
+        .unwrap_or_else(|| PathBuf::from("cost.jsonl"));
+
+    eprintln!();
+    eprintln!(
+        "  {} {}",
+        style("Cost").bold(),
+        style(display_path(&cost_path)).dim(),
+    );
+
+    let records = match crate::agent::cost::CostTracker::read_all(&cost_path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("  {} could not read cost log: {}", style("!").yellow(), e);
+            eprintln!();
+            return;
+        }
+    };
+
+    if records.is_empty() {
+        eprintln!(
+            "    {} · {} · {} tool {}",
+            style(format!("{} turns", session_turns)).white(),
+            style(format!("{} tokens", format_token_count(session_tokens))).white(),
+            style(session_tool_calls).white(),
+            if session_tool_calls == 1 { "use" } else { "uses" },
+        );
+        eprintln!(
+            "    {}",
+            style("(no cost entries yet — start a turn to populate cost.jsonl)").dim(),
+        );
+        eprintln!();
+        return;
+    }
+
+    eprintln!(
+        "    {:<28} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        style("model").dim(),
+        style("in").dim(),
+        style("out").dim(),
+        style("cache_w").dim(),
+        style("cache_r").dim(),
+        style("usd").dim(),
+    );
+
+    let mut tot_in = 0u64;
+    let mut tot_out = 0u64;
+    let mut tot_cw = 0u64;
+    let mut tot_cr = 0u64;
+    let mut tot_usd = 0.0f64;
+    for r in &records {
+        tot_in += r.tokens_in;
+        tot_out += r.tokens_out;
+        tot_cw += r.cache_in;
+        tot_cr += r.cache_read;
+        tot_usd += r.estimated_usd;
+        eprintln!(
+            "    {:<28} {:>10} {:>10} {:>10} {:>10} {:>10.4}",
+            truncate(&r.model, 28),
+            format_token_count(r.tokens_in),
+            format_token_count(r.tokens_out),
+            format_token_count(r.cache_in),
+            format_token_count(r.cache_read),
+            r.estimated_usd,
+        );
+    }
+
+    eprintln!(
+        "    {:<28} {:>10} {:>10} {:>10} {:>10} {:>10.4}",
+        style("total").bold().to_string(),
+        format_token_count(tot_in),
+        format_token_count(tot_out),
+        format_token_count(tot_cw),
+        format_token_count(tot_cr),
+        tot_usd,
+    );
+    eprintln!();
 }
 
 /// `/quit` — exit the REPL.

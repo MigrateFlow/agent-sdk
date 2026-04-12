@@ -24,6 +24,38 @@ pub enum HookEvent {
         task: Task,
         agent_id: AgentId,
     },
+
+    /// Fired immediately before a tool call is dispatched.
+    /// Return `HookResult::Reject { feedback }` to skip the tool and
+    /// synthesize a tool result containing `feedback` for the model.
+    PreToolCall {
+        name: String,
+        args: serde_json::Value,
+    },
+
+    /// Fired after a tool call completes (successfully or not).
+    PostToolCall {
+        name: String,
+        args: serde_json::Value,
+        result_preview: String,
+        duration_ms: u64,
+    },
+
+    /// Fired immediately before an LLM request is sent.
+    PreLlmRequest {
+        message_count: usize,
+    },
+
+    /// Fired after an LLM request returns. `cache_in` and `cache_read`
+    /// are `0` for providers that do not surface prompt-caching metrics.
+    PostLlmRequest {
+        tokens_in: u64,
+        tokens_out: u64,
+        cache_in: u64,
+        cache_read: u64,
+        duration_ms: u64,
+        model: String,
+    },
 }
 
 /// Result of a hook evaluation.
