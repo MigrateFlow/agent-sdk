@@ -808,7 +808,8 @@ async fn run_turn(
                 // own background consolidation path. The CLI runs its own
                 // loop and does not currently dispatch summaries, so if one
                 // somehow lands here we simply ignore it.
-                agent_sdk::agent::agent_loop::BackgroundResultKind::CompactionSummary { .. } => {
+                agent_sdk::agent::agent_loop::BackgroundResultKind::CompactionSummary { .. }
+                | agent_sdk::agent::agent_loop::BackgroundResultKind::SubAgentPartial => {
                     continue;
                 }
             };
@@ -1408,6 +1409,16 @@ async fn main() -> anyhow::Result<()> {
                         name_tag(name, c),
                         style("✗").red(),
                         style(truncate(error, 80)).red(),
+                    );
+                }
+                AgentEvent::SubAgentUpdate { ref name, ref content, is_final, .. } => {
+                    let c = agent_color(name, &mut color_map, &mut next_color);
+                    let marker = if is_final { "✔" } else { "…" };
+                    eprintln!(
+                        "{} {} {}",
+                        name_tag(name, c),
+                        style(marker).fg(c),
+                        style(truncate(content, 80)).dim(),
                     );
                 }
 

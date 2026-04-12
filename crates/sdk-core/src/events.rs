@@ -155,6 +155,16 @@ pub enum AgentEvent {
         name: String,
         error: String,
     },
+    /// Intermediate update from a running subagent — partial result before completion.
+    SubAgentUpdate {
+        agent_id: AgentId,
+        name: String,
+        iteration: usize,
+        /// The assistant's text content from this iteration.
+        content: String,
+        /// Whether this is the final iteration (subagent is about to return).
+        is_final: bool,
+    },
 
     /// Domain-specific custom event
     Custom {
@@ -186,7 +196,8 @@ impl AgentEvent {
             Self::SubAgentSpawned { agent_id, .. }
             | Self::SubAgentProgress { agent_id, .. }
             | Self::SubAgentCompleted { agent_id, .. }
-            | Self::SubAgentFailed { agent_id, .. } => Some(*agent_id),
+            | Self::SubAgentFailed { agent_id, .. }
+            | Self::SubAgentUpdate { agent_id, .. } => Some(*agent_id),
             Self::TeamSpawned { .. }
             | Self::HookRejected { .. }
             | Self::MemoryCompacted { .. }
@@ -217,7 +228,8 @@ impl AgentEvent {
             Self::SubAgentSpawned { name, .. }
             | Self::SubAgentProgress { name, .. }
             | Self::SubAgentCompleted { name, .. }
-            | Self::SubAgentFailed { name, .. } => Some(name),
+            | Self::SubAgentFailed { name, .. }
+            | Self::SubAgentUpdate { name, .. } => Some(name),
             Self::TeamSpawned { .. }
             | Self::HookRejected { .. }
             | Self::MemoryCompacted { .. }

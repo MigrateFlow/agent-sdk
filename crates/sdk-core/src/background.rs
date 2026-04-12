@@ -17,6 +17,8 @@ pub struct BackgroundResult {
 pub enum BackgroundResultKind {
     SubAgent,
     AgentTeam,
+    /// Partial/intermediate result from a running subagent.
+    SubAgentPartial,
     /// A compaction summary produced by an off-loop summarization subagent.
     /// `target_window_start` / `target_window_end` mark the range of messages
     /// that should be replaced by the summary (half-open interval

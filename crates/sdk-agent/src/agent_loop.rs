@@ -308,6 +308,13 @@ impl AgentLoop {
                                 content: truncate(text, 200),
                                 iteration,
                             });
+                            self.emit(AgentEvent::SubAgentUpdate {
+                                agent_id: self.agent_id,
+                                name: self.agent_name.clone(),
+                                iteration,
+                                content: text.clone(),
+                                is_final: false,
+                            });
                         }
                     }
 
@@ -447,6 +454,15 @@ impl AgentLoop {
                 }
                 ChatMessage::Assistant { content, .. } => {
                     let final_content = content.clone().unwrap_or_default();
+                    if !final_content.trim().is_empty() {
+                        self.emit(AgentEvent::SubAgentUpdate {
+                            agent_id: self.agent_id,
+                            name: self.agent_name.clone(),
+                            iteration,
+                            content: final_content.clone(),
+                            is_final: true,
+                        });
+                    }
                     self.messages.push(response);
 
                     info!(
@@ -907,11 +923,16 @@ impl AgentLoop {
                         strategy,
                     );
                 }
+                BackgroundResultKind::SubAgentPartial => {
+                    // Partial results flow through the event channel only;
+                    // they are not injected into the parent conversation.
+                }
                 BackgroundResultKind::SubAgent | BackgroundResultKind::AgentTeam => {
                     let kind_label = match kind {
                         BackgroundResultKind::SubAgent => "subagent",
                         BackgroundResultKind::AgentTeam => "agent team",
-                        BackgroundResultKind::CompactionSummary { .. } => unreachable!(),
+                        BackgroundResultKind::CompactionSummary { .. }
+                        | BackgroundResultKind::SubAgentPartial => unreachable!(),
                     };
                     let notification = format!(
                         "[Background {} '{}' completed — {} tokens]\n\n{}",
