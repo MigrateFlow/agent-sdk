@@ -178,3 +178,58 @@ The CLI prints:
 - token and tool call usage per turn
 
 The event printer also shows teammate activity when a team is spawned.
+
+## Registering Custom Slash Commands
+
+The built-in REPL commands (`/help`, `/clear`, `/compact`, `/tasks`, `/cost`,
+`/quit`) are registered through a pluggable [`SlashCommandRegistry`]. Library
+consumers can implement the [`SlashCommand`] trait to add their own commands,
+then register them on top of the built-ins before passing the registry into
+the REPL loop.
+
+```rust
+use std::sync::Arc;
+
+use agent_sdk::{
+    CommandContext, CommandOutcome, SdkResult, SlashCommand, SlashCommandRegistry,
+};
+use async_trait::async_trait;
+
+/// `/repeat <text>` — echoes `text` back to the user.
+struct RepeatCommand;
+
+#[async_trait]
+impl SlashCommand for RepeatCommand {
+    fn name(&self) -> &str { "repeat" }
+    fn help(&self) -> &str { "echo the given text back to the terminal" }
+
+    async fn execute(
+        &self,
+        _ctx: &mut CommandContext<'_>,
+        args: &str,
+    ) -> SdkResult<CommandOutcome> {
+        Ok(CommandOutcome::Output(args.to_string()))
+    }
+}
+
+let mut registry = SlashCommandRegistry::builtin();
+registry.register(Arc::new(RepeatCommand));
+```
+
+Dispatch contract:
+
+- `registry.dispatch("/foo bar", &mut ctx)` returns `Ok(Some(CommandOutcome))`
+  when the command name matches, `Ok(None)` when the input is not a slash
+  command (treat as a regular prompt), and `Err(SdkError::Config)` when the
+  input starts with `/` but no command matched.
+- `CommandOutcome::{Continue, Clear, Compact, Quit, Output(_)}` tells the
+  REPL what to do next.
+- Each command receives a [`CommandContext`] holding mutable references to
+  the conversation, task list, session-path, and per-session counters.
+
+See `src/cli/commands.rs` for the full trait definition and the
+implementations of the six built-ins.
+
+[`SlashCommand`]: ../src/cli/commands.rs
+[`SlashCommandRegistry`]: ../src/cli/commands.rs
+[`CommandContext`]: ../src/cli/commands.rs

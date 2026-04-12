@@ -16,11 +16,16 @@ use agent_sdk::tools::mcp_tools::McpTool;
 use agent_sdk::mcp::{McpClient, McpConfig, McpServerSpec, StdioTransport};
 use agent_sdk::traits::tool::{Tool, ToolDefinition};
 use agent_sdk::types::chat::ChatMessage;
+use agent_sdk::cli::{
+    display::{display_path, floor_char_boundary, format_token_count, print_task_list, truncate},
+    session::{default_session_path, load_session, save_session, CliTask},
+    CommandContext, CommandOutcome, SlashCommandRegistry,
+};
 use agent_sdk::{AgentEvent, StreamDelta};
 use clap::Parser;
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 
 // ─── CLI args ────────────────────────────────────────────────────────────────
@@ -100,30 +105,7 @@ fn emit_ndjson(event: &NdjsonEvent) {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CliTask {
-    title: String,
-    status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CliSessionData {
-    messages: Vec<ChatMessage>,
-    #[serde(default)]
-    tasks: Vec<CliTask>,
-}
-
 // ─── Display helpers ─────────────────────────────────────────────────────────
-
-/// Shorten home dir to ~ for display.
-fn display_path(path: &Path) -> String {
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(rel) = path.strip_prefix(&home) {
-            return format!("~/{}", rel.display());
-        }
-    }
-    path.display().to_string()
-}
 
 /// Detect current git branch (returns None if not a git repo).
 fn git_branch(work_dir: &Path) -> Option<String> {
@@ -163,25 +145,6 @@ fn print_welcome(model: &str, work_dir: &Path) {
         "   {}",
         style("Type /help for commands · Ctrl+C to interrupt · Ctrl+C twice to quit").dim()
     );
-    eprintln!();
-}
-
-fn print_help() {
-    eprintln!();
-    eprintln!("  {}", style("Commands").bold());
-    eprintln!();
-    eprintln!("    {}       clear conversation and start fresh", style("/clear").cyan());
-    eprintln!("    {}     compact context to free up space", style("/compact").cyan());
-    eprintln!("    {}       show current task list", style("/tasks").cyan());
-    eprintln!("    {}        show session stats & token usage", style("/cost").cyan());
-    eprintln!("    {}        show this help", style("/help").cyan());
-    eprintln!("    {}        exit the agent", style("/quit").cyan());
-    eprintln!();
-    eprintln!("  {}", style("Tips").bold());
-    eprintln!();
-    eprintln!("    End a line with {} for multi-line input", style("\\").cyan());
-    eprintln!("    {} to interrupt, press twice to force-quit", style("Ctrl+C").cyan());
-    eprintln!("    {} for one-shot mode", style("agent \"your prompt\"").cyan());
     eprintln!();
 }
 
@@ -440,39 +403,6 @@ fn print_team_result_summary(result: &str) {
     }
 }
 
-fn task_status_display(status: &str) -> (console::StyledObject<&'static str>, console::Color) {
-    match status {
-        "completed" => (style("✓").green(), console::Color::Green),
-        "in_progress" => (style("◐").cyan(), console::Color::Cyan),
-        "blocked" => (style("!").red(), console::Color::Red),
-        _ => (style("○").dim(), console::Color::White),
-    }
-}
-
-fn print_task_list(tasks: &[CliTask]) {
-    if tasks.is_empty() {
-        return;
-    }
-
-    let completed = tasks.iter().filter(|t| t.status == "completed").count();
-    let total = tasks.len();
-
-    eprintln!(
-        "  {} ({}/{})",
-        style("Tasks").bold(),
-        completed,
-        total,
-    );
-    for task in tasks.iter() {
-        let (symbol, color) = task_status_display(&task.status);
-        eprintln!(
-            "    {} {}",
-            symbol,
-            style(&task.title).fg(color),
-        );
-    }
-}
-
 fn arg_str<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(|v| v.as_str())
 }
@@ -490,27 +420,6 @@ fn humanize(name: &str) -> String {
         }
     }
     if out.is_empty() { name.to_string() } else { out }
-}
-
-/// Find the largest byte index <= `desired` that lies on a UTF-8 char boundary.
-fn floor_char_boundary(s: &str, desired: usize) -> usize {
-    if desired >= s.len() {
-        return s.len();
-    }
-    let mut idx = desired;
-    while idx > 0 && !s.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    idx
-}
-
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        let end = floor_char_boundary(s, max_len);
-        format!("{}…", &s[..end])
-    }
 }
 
 const MAX_TOOL_RESULT_CHARS: usize = 12_000;
@@ -547,16 +456,6 @@ fn truncate_tool_result(s: &str) -> String {
         end,
         s.len()
     )
-}
-
-fn format_token_count(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.1}k", n as f64 / 1_000.0)
-    } else {
-        n.to_string()
-    }
 }
 
 struct UpdateTaskListTool {
@@ -785,48 +684,6 @@ fn build_verify_mermaid_tool(work_dir: &Path) -> Option<VerifyMermaidTool> {
     })
 }
 
-fn default_session_path(work_dir: &Path) -> PathBuf {
-    agent_sdk::storage::AgentPaths::for_work_dir(work_dir)
-        .map(|paths| paths.cli_session_path())
-        .unwrap_or_else(|_| {
-            work_dir
-                .join(agent_sdk::config::AGENT_DIR)
-                .join("session.json")
-        })
-}
-
-fn load_session(path: &Path, system_prompt: &str) -> Option<CliSessionData> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let session = serde_json::from_str::<CliSessionData>(&content)
-        .ok()
-        .or_else(|| {
-            serde_json::from_str::<Vec<ChatMessage>>(&content)
-                .ok()
-                .map(|messages| CliSessionData {
-                    messages,
-                    tasks: Vec::new(),
-                })
-        })?;
-
-    // Validate system prompt matches
-    match session.messages.first() {
-        Some(ChatMessage::System { content }) if content == system_prompt => Some(session),
-        _ => None,
-    }
-}
-
-fn save_session(path: &Path, messages: &[ChatMessage], tasks: &[CliTask]) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let session = CliSessionData {
-        messages: messages.to_vec(),
-        tasks: tasks.to_vec(),
-    };
-    std::fs::write(path, serde_json::to_string(&session)?)?;
-    Ok(())
-}
-
 // ─── Input ───────────────────────────────────────────────────────────────────
 
 /// Read input with multi-line support (trailing `\` continues).
@@ -869,14 +726,6 @@ struct TurnStats {
     tokens: u64,
     tool_calls: usize,
     duration: std::time::Duration,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CliCompactionProfile {
-    keep_recent: usize,
-    tool_limit: usize,
-    assistant_limit: usize,
-    compress_user_messages: bool,
 }
 
 async fn run_turn(
@@ -1220,104 +1069,6 @@ async fn run_turn(
         tool_calls: tool_calls_count,
         duration: started.elapsed(),
     })
-}
-
-// ─── Compact ─────────────────────────────────────────────────────────────────
-
-fn select_cli_compaction_profile(messages: &[ChatMessage]) -> (&'static str, CliCompactionProfile) {
-    let total = messages.len().max(1);
-    let tool_count = messages.iter().filter(|m| matches!(m, ChatMessage::Tool { .. })).count();
-    let assistant_count = messages
-        .iter()
-        .filter(|m| matches!(m, ChatMessage::Assistant { .. }))
-        .count();
-    let tool_ratio = tool_count as f64 / total as f64;
-    let assistant_ratio = assistant_count as f64 / total as f64;
-
-    if total >= 60 || tool_ratio >= 0.35 {
-        return (
-            "aggressive",
-            CliCompactionProfile {
-                keep_recent: 5,
-                tool_limit: 120,
-                assistant_limit: 120,
-                compress_user_messages: true,
-            },
-        );
-    }
-
-    if assistant_ratio >= 0.45 {
-        return (
-            "conservative",
-            CliCompactionProfile {
-                keep_recent: 8,
-                tool_limit: 350,
-                assistant_limit: 250,
-                compress_user_messages: false,
-            },
-        );
-    }
-
-    (
-        "default",
-        CliCompactionProfile {
-            keep_recent: 6,
-            tool_limit: 200,
-            assistant_limit: 150,
-            compress_user_messages: false,
-        },
-    )
-}
-
-fn compact_conversation(messages: &mut Vec<ChatMessage>) -> (usize, &'static str) {
-    let before = messages.len();
-    if before <= 4 {
-        return (0, "none");
-    }
-
-    let (strategy, profile) = select_cli_compaction_profile(messages);
-    let keep_tail = profile.keep_recent.min(before - 1);
-    let compact_end = before - keep_tail;
-
-    for i in 1..compact_end {
-        match &messages[i] {
-            ChatMessage::Tool {
-                tool_call_id,
-                content,
-            } => {
-                if content.len() > profile.tool_limit {
-                    let summary = format!("[compacted: {} chars]", content.len());
-                    messages[i] = ChatMessage::Tool {
-                        tool_call_id: tool_call_id.clone(),
-                        content: summary,
-                    };
-                }
-            }
-            ChatMessage::Assistant {
-                content,
-                tool_calls,
-            } if content
-                .as_ref()
-                .is_some_and(|c| c.len() > profile.assistant_limit) =>
-            {
-                let short = content.as_ref().map(|c| truncate(c, profile.assistant_limit));
-                messages[i] = ChatMessage::Assistant {
-                    content: short,
-                    tool_calls: tool_calls.clone(),
-                };
-            }
-            ChatMessage::User { content } if profile.compress_user_messages && content.len() > 200 => {
-                messages[i] = ChatMessage::User {
-                    content: truncate(content, 150),
-                };
-            }
-            _ => {}
-        }
-    }
-
-    let _ = before - messages.len();
-    // Messages aren't removed, just shortened — return count of compacted entries
-    (compact_end.saturating_sub(1), strategy)
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -1712,6 +1463,9 @@ async fn main() -> anyhow::Result<()> {
     // ── Interactive REPL ──
     print_welcome(&model, &work_dir);
 
+    let paths = agent_sdk::storage::AgentPaths::for_work_dir(&work_dir)?;
+    let slash_registry = SlashCommandRegistry::builtin();
+
     let tasks = Arc::new(Mutex::new(Vec::<CliTask>::new()));
 
     let mut messages = match load_session(&session_path, &system_prompt) {
@@ -1761,93 +1515,49 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ── Slash commands ──
-        match input.as_str() {
-            "/quit" | "/exit" | "/q" => break,
+        if input.starts_with('/') {
+            let mut ctx = CommandContext {
+                messages: &mut messages,
+                tasks: tasks.clone(),
+                paths: &paths,
+                session_path: session_path.clone(),
+                system_prompt: &system_prompt,
+                total_tokens: &mut session_tokens,
+                tool_calls: &mut session_tool_calls,
+                turns: &mut session_turns,
+            };
 
-            "/clear" | "/new" => {
-                messages = vec![ChatMessage::system(&system_prompt)];
-                {
-                    let mut current = tasks.lock().expect("task list mutex poisoned");
-                    current.clear();
-                }
-                save_session(
-                    &session_path,
-                    &messages,
-                    &tasks.lock().expect("task list mutex poisoned"),
-                )?;
-                session_tokens = 0;
-                session_tool_calls = 0;
-                session_turns = 0;
-                eprintln!("  {} {}", style("✓").green(), style("Conversation cleared").dim());
-                eprintln!();
-                continue;
-            }
-
-            "/compact" => {
-                let (freed, strategy) = compact_conversation(&mut messages);
-                save_session(
-                    &session_path,
-                    &messages,
-                    &tasks.lock().expect("task list mutex poisoned"),
-                )?;
-                eprintln!(
-                    "  {} Compacted {} messages ({} strategy, {} remaining)",
-                    style("✓").green(),
-                    freed,
-                    style(strategy).dim(),
-                    messages.len(),
-                );
-                eprintln!();
-                continue;
-            }
-
-            "/cost" | "/status" => {
-                eprintln!();
-                eprintln!(
-                    "  {} {}",
-                    style("Session").bold(),
-                    style(&display_path(&session_path)).dim(),
-                );
-                eprintln!(
-                    "    {} · {} · {} tool {} · {} messages",
-                    style(format!("{} turns", session_turns)).white(),
-                    style(format!("{} tokens", format_token_count(session_tokens))).white(),
-                    style(session_tool_calls).white(),
-                    if session_tool_calls == 1 { "use" } else { "uses" },
-                    style(messages.len()).dim(),
-                );
-                let current = tasks.lock().expect("task list mutex poisoned").clone();
-                if !current.is_empty() {
+            match slash_registry.dispatch(&input, &mut ctx).await {
+                Ok(Some(CommandOutcome::Quit)) => break,
+                Ok(Some(CommandOutcome::Clear)) => {
+                    eprintln!(
+                        "  {} {}",
+                        style("✓").green(),
+                        style("Conversation cleared").dim(),
+                    );
                     eprintln!();
-                    print_task_list(&current);
+                    continue;
                 }
-                eprintln!();
-                continue;
+                Ok(Some(CommandOutcome::Compact)) => continue,
+                Ok(Some(CommandOutcome::Output(text))) => {
+                    eprintln!("{}", text);
+                    continue;
+                }
+                Ok(Some(CommandOutcome::Continue)) => continue,
+                Ok(None) => {
+                    // Not a slash command — fall through to regular prompt.
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  {} {}  (type {} for help)",
+                        style("?").yellow(),
+                        style(e.to_string()).white(),
+                        style("/help").cyan(),
+                    );
+                    eprintln!();
+                    continue;
+                }
             }
-
-            "/tasks" => {
-                let current = tasks.lock().expect("task list mutex poisoned").clone();
-                print_task_list(&current);
-                continue;
-            }
-
-            "/help" => {
-                print_help();
-                continue;
-            }
-
-            cmd if cmd.starts_with('/') => {
-                eprintln!(
-                    "  {} Unknown command: {}  (type {} for help)",
-                    style("?").yellow(),
-                    style(cmd).white(),
-                    style("/help").cyan(),
-                );
-                eprintln!();
-                continue;
-            }
-
-            _ => {}
         }
 
         let stats = run_turn(
