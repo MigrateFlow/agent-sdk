@@ -232,7 +232,7 @@ impl ClaudeClient {
         Ok(Self {
             http,
             api_key,
-            model: config.model.clone(),
+            model: config.resolve_model(),
             max_tokens: config.max_tokens,
             base_url,
             rate_limiter: RateLimiter::new(config.requests_per_minute),

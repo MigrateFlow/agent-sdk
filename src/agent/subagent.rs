@@ -16,13 +16,9 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::error::{AgentId, SdkResult};
-use crate::tools::command_tools::RunCommandTool;
-use crate::tools::fs_tools::{ListDirectoryTool, ReadFileTool, WriteFileTool};
+use crate::tools::builder::{CommandToolPolicy, DefaultToolsetBuilder, ToolFilter};
 use crate::tools::registry::ToolRegistry;
-use crate::tools::search_tools::SearchFilesTool;
-use crate::tools::web_tools::WebSearchTool;
 use crate::traits::llm_client::LlmClient;
-use crate::traits::tool::Tool;
 
 use super::agent_loop::{AgentLoop, AgentLoopResult};
 use super::events::AgentEvent;
@@ -282,67 +278,20 @@ impl SubAgentRunner {
 
     /// Build the tool registry for a subagent, respecting allowed/disallowed lists.
     fn build_tools(&self, def: &SubAgentDef) -> ToolRegistry {
-        // NOTE: spawn_subagent and spawn_agent_team are intentionally NOT included.
-        // Subagents cannot spawn other subagents (no nesting).
-        let all_tools: Vec<(String, Arc<dyn Tool>)> = vec![
-            (
-                "read_file".to_string(),
-                Arc::new(ReadFileTool {
-                    source_root: self.source_root.clone(),
-                    work_dir: self.work_dir.clone(),
-                }),
-            ),
-            (
-                "write_file".to_string(),
-                Arc::new(WriteFileTool {
-                    work_dir: self.work_dir.clone(),
-                }),
-            ),
-            (
-                "list_directory".to_string(),
-                Arc::new(ListDirectoryTool {
-                    source_root: self.source_root.clone(),
-                    work_dir: self.work_dir.clone(),
-                }),
-            ),
-            (
-                "search_files".to_string(),
-                Arc::new(SearchFilesTool {
-                    source_root: self.source_root.clone(),
-                }),
-            ),
-            (
-                "web_search".to_string(),
-                Arc::new(WebSearchTool),
-            ),
-            (
-                "run_command".to_string(),
-                Arc::new(RunCommandTool::with_defaults(self.work_dir.clone())),
-            ),
-        ];
-
-        let allowed_set: Option<std::collections::HashSet<&str>> =
-            if def.allowed_tools.is_empty() {
-                None
-            } else {
-                Some(def.allowed_tools.iter().map(|s| s.as_str()).collect())
-            };
-        let denied_set: std::collections::HashSet<&str> =
-            def.disallowed_tools.iter().map(|s| s.as_str()).collect();
-
-        let mut registry = ToolRegistry::new();
-        for (name, tool) in all_tools {
-            let pass_allow = match &allowed_set {
-                Some(set) => set.contains(name.as_str()),
-                None => true,
-            };
-            let pass_deny = !denied_set.contains(name.as_str());
-            if pass_allow && pass_deny {
-                registry.register(tool);
-            }
+        let filter = if def.allowed_tools.is_empty() {
+            ToolFilter::default()
+        } else {
+            ToolFilter::allow_only(def.allowed_tools.clone())
         }
+        .deny(def.disallowed_tools.clone());
 
-        registry
+        DefaultToolsetBuilder::with_filter(filter)
+            .add_core_tools(
+                self.source_root.clone(),
+                self.work_dir.clone(),
+                CommandToolPolicy::Unrestricted,
+            )
+            .build()
     }
 
     fn emit(&self, event: AgentEvent) {

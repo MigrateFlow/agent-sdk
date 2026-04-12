@@ -1,4 +1,5 @@
 pub mod registry;
+pub mod builder;
 pub mod fs_tools;
 pub mod command_tools;
 pub mod memory_tools;

@@ -11,6 +11,7 @@ use crate::traits::prompt_builder::{DefaultPromptBuilder, PromptBuilder};
 use crate::mailbox::broker::MessageBroker;
 use crate::storage::AgentPaths;
 use crate::task::store::TaskStore;
+use crate::tools::builder::{CommandToolPolicy, DefaultToolsetBuilder};
 use crate::types::task::Task;
 
 use super::agent_loop::{AgentLoop, AgentLoopResult};
@@ -280,31 +281,13 @@ impl AgentTeam {
             None => crate::llm::create_client(&self.llm_config)?,
         };
 
-        use crate::tools::command_tools::RunCommandTool;
-        use crate::tools::fs_tools::{ListDirectoryTool, ReadFileTool, WriteFileTool};
-        use crate::tools::registry::ToolRegistry;
-        use crate::tools::search_tools::SearchFilesTool;
-        use crate::tools::web_tools::WebSearchTool;
-
-        let mut tools = ToolRegistry::new();
-        tools.register(Arc::new(ReadFileTool {
-            source_root: self.source_root.clone(),
-            work_dir: self.work_dir.clone(),
-        }));
-        tools.register(Arc::new(WriteFileTool {
-            work_dir: self.work_dir.clone(),
-        }));
-        tools.register(Arc::new(ListDirectoryTool {
-            source_root: self.source_root.clone(),
-            work_dir: self.work_dir.clone(),
-        }));
-        tools.register(Arc::new(SearchFilesTool {
-            source_root: self.source_root.clone(),
-        }));
-        tools.register(Arc::new(WebSearchTool));
-        tools.register(Arc::new(RunCommandTool::with_defaults(
-            self.work_dir.clone(),
-        )));
+        let tools = DefaultToolsetBuilder::new()
+            .add_core_tools(
+                self.source_root.clone(),
+                self.work_dir.clone(),
+                CommandToolPolicy::Unrestricted,
+            )
+            .build();
 
         let system = crate::prompts::single_agent_system_prompt(
             &self.source_root,

@@ -7,13 +7,10 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use agent_sdk::config::{LlmConfig, LlmProvider};
-use agent_sdk::tools::command_tools::RunCommandTool;
-use agent_sdk::tools::fs_tools::{ListDirectoryTool, ReadFileTool, WriteFileTool};
+use agent_sdk::tools::builder::{
+    CommandToolPolicy, DefaultToolsetBuilder, SubAgentToolConfig, TeamToolConfig, ToolFilter,
+};
 use agent_sdk::tools::registry::ToolRegistry;
-use agent_sdk::tools::search_tools::SearchFilesTool;
-use agent_sdk::tools::subagent_tools::SpawnSubAgentTool;
-use agent_sdk::tools::team_tools::SpawnAgentTeamTool;
-use agent_sdk::tools::web_tools::WebSearchTool;
 use agent_sdk::tools::mermaid_tools::VerifyMermaidTool;
 use agent_sdk::tools::mcp_tools::McpTool;
 use agent_sdk::mcp::{McpClient, McpConfig, McpServerSpec, StdioTransport};
@@ -31,7 +28,7 @@ use serde_json::json;
 #[derive(Parser)]
 #[command(
     name = "agent",
-    about = "AI coding assistant — minimal Claude Code",
+    about = "General-purpose AI agent CLI",
     version
 )]
 struct Cli {
@@ -729,100 +726,63 @@ fn build_tools(
     tool_filter: Option<&[String]>,
     mcp_tools: &[Arc<dyn Tool>],
 ) -> ToolRegistry {
-    let mut registry = ToolRegistry::new();
-
-    let allowed = |name: &str| -> bool {
-        match &tool_filter {
-            None => true,
-            Some(filter) => filter.iter().any(|f| f == name),
-        }
+    let filter = tool_filter
+        .map(|names| ToolFilter::allow_only(names.iter().cloned()))
+        .unwrap_or_default();
+    let command_policy = if allow_all {
+        CommandToolPolicy::Unrestricted
+    } else {
+        CommandToolPolicy::Unrestricted
     };
 
-    if allowed("read_file") {
-        registry.register(Arc::new(ReadFileTool {
-            source_root: work_dir.to_path_buf(),
-            work_dir: work_dir.to_path_buf(),
-        }));
-    }
-    if allowed("write_file") {
-        registry.register(Arc::new(WriteFileTool {
-            work_dir: work_dir.to_path_buf(),
-        }));
-    }
-    if allowed("list_directory") {
-        registry.register(Arc::new(ListDirectoryTool {
-            source_root: work_dir.to_path_buf(),
-            work_dir: work_dir.to_path_buf(),
-        }));
-    }
-    if allowed("search_files") {
-        registry.register(Arc::new(SearchFilesTool {
-            source_root: work_dir.to_path_buf(),
-        }));
-    }
-    if allowed("web_search") {
-        registry.register(Arc::new(WebSearchTool));
-    }
-
-    if allowed("run_command") {
-        if allow_all {
-            registry.register(Arc::new(RunCommandTool {
-                work_dir: work_dir.to_path_buf(),
-                allowed_commands: vec![],
-            }));
-        } else {
-            registry.register(Arc::new(RunCommandTool::with_defaults(work_dir.to_path_buf())));
-        }
-    }
-
-    if allowed("spawn_agent_team") {
-        registry.register(Arc::new(SpawnAgentTeamTool {
+    let mut builder = DefaultToolsetBuilder::with_filter(filter)
+        .add_core_tools(
+            work_dir.to_path_buf(),
+            work_dir.to_path_buf(),
+            command_policy,
+        )
+        .add_team_tool(TeamToolConfig {
             work_dir: work_dir.to_path_buf(),
             source_root: work_dir.to_path_buf(),
             llm_client: llm_client.clone(),
             event_tx: event_tx.clone(),
             background_tx: background_tx.clone(),
-        }));
-    }
-
-    if allowed("spawn_sub_agent") {
-        registry.register(Arc::new(SpawnSubAgentTool {
+        })
+        .add_subagent_tool(SubAgentToolConfig {
             work_dir: work_dir.to_path_buf(),
             source_root: work_dir.to_path_buf(),
             llm_client,
             event_tx,
             registry: subagent_registry,
             background_tx,
-        }));
-    }
+        });
 
-    if allowed("update_task_list") {
-        registry.register(Arc::new(UpdateTaskListTool { tasks }));
+    builder = builder.add_custom_tool(Arc::new(UpdateTaskListTool { tasks }));
+
+    if let Some(mermaid_tool) = build_verify_mermaid_tool(work_dir) {
+        builder = builder.add_custom_tool(Arc::new(mermaid_tool));
     }
 
     for tool in mcp_tools {
-        let def = tool.definition();
-        if allowed(&def.name) {
-            registry.register(tool.clone());
-        }
+        builder = builder.add_custom_tool(tool.clone());
     }
 
-    if allowed("verify_mermaid") {
-        // Script path is resolved relative to the SDK package, or via env var
-        let script_path = std::env::var("VERIFY_MERMAID_SCRIPT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| work_dir.join("node_modules/@optage/sdk/verify-mermaid-cli.mjs"));
-        // Work dir for node should be where node_modules are accessible
-        let node_work_dir = std::env::var("VERIFY_MERMAID_WORK_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| work_dir.to_path_buf());
-        registry.register(Arc::new(VerifyMermaidTool {
-            script_path,
-            work_dir: node_work_dir,
-        }));
-    }
+    builder.build()
+}
 
-    registry
+fn build_verify_mermaid_tool(work_dir: &Path) -> Option<VerifyMermaidTool> {
+    let script_path = std::env::var("VERIFY_MERMAID_SCRIPT")
+        .ok()
+        .map(PathBuf::from)?;
+
+    let node_work_dir = std::env::var("VERIFY_MERMAID_WORK_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| work_dir.to_path_buf());
+
+    Some(VerifyMermaidTool {
+        script_path,
+        work_dir: node_work_dir,
+    })
 }
 
 fn default_session_path(work_dir: &Path) -> PathBuf {
@@ -1390,34 +1350,20 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // ── Provider detection ──
-    let provider = if let Some(ref p) = cli.provider {
-        match p.to_lowercase().as_str() {
-            "openai" | "open_ai" => LlmProvider::OpenAi,
-            _ => LlmProvider::Claude,
-        }
-    } else if std::env::var("LLM_PROVIDER")
-        .map(|v| v.to_lowercase())
+    let provider = cli
+        .provider
         .as_deref()
-        == Ok("openai")
-        || (std::env::var("OPENAI_API_KEY").is_ok() && std::env::var("ANTHROPIC_API_KEY").is_err())
-    {
-        LlmProvider::OpenAi
-    } else {
-        LlmProvider::Claude
-    };
+        .and_then(LlmProvider::parse)
+        .unwrap_or_else(LlmProvider::detect);
 
     // ── Model detection ──
     let model = cli.model.unwrap_or_else(|| {
-        let provider_env = match provider {
-            LlmProvider::Claude => "ANTHROPIC_MODEL",
-            LlmProvider::OpenAi => "OPENAI_MODEL",
-        };
-        std::env::var(provider_env)
-            .or_else(|_| std::env::var("LLM_MODEL"))
-            .unwrap_or_else(|_| match provider {
-                LlmProvider::Claude => "claude-sonnet-4-20250514".to_string(),
-                LlmProvider::OpenAi => "gpt-4o".to_string(),
-            })
+        LlmConfig {
+            provider: provider.clone(),
+            model: String::new(),
+            ..LlmConfig::default()
+        }
+        .resolve_model()
     });
 
     let llm_config = LlmConfig {

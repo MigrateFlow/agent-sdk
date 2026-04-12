@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::{debug, error, info, warn};
@@ -10,13 +9,8 @@ use crate::types::message::{
     TaskCompletePayload, TaskFailedPayload, TeammateIdlePayload,
 };
 use crate::types::task::{Task, TaskResult};
-use crate::tools::command_tools::RunCommandTool;
-use crate::tools::context_tools::{GetTaskContextTool, ListCompletedTasksTool};
-use crate::tools::fs_tools::{ListDirectoryTool, ReadFileTool, WriteFileTool};
-use crate::tools::memory_tools::{ListMemoryTool, ReadMemoryTool, WriteMemoryTool};
+use crate::tools::builder::{CommandToolPolicy, DefaultToolsetBuilder};
 use crate::tools::registry::ToolRegistry;
-use crate::tools::search_tools::SearchFilesTool;
-use crate::tools::web_tools::WebSearchTool;
 
 use super::agent_loop::AgentLoop;
 use super::context::AgentContext;
@@ -35,44 +29,15 @@ impl Teammate {
 
     /// Build the default tool registry. Override via `PromptBuilder::customize_tools`.
     fn build_tool_registry(&self) -> ToolRegistry {
-        let mut registry = ToolRegistry::new();
-
-        registry.register(Arc::new(ReadFileTool {
-            source_root: self.ctx.source_root.clone(),
-            work_dir: self.ctx.work_dir.clone(),
-        }));
-        registry.register(Arc::new(WriteFileTool {
-            work_dir: self.ctx.work_dir.clone(),
-        }));
-        registry.register(Arc::new(ListDirectoryTool {
-            source_root: self.ctx.source_root.clone(),
-            work_dir: self.ctx.work_dir.clone(),
-        }));
-        registry.register(Arc::new(SearchFilesTool {
-            source_root: self.ctx.source_root.clone(),
-        }));
-        registry.register(Arc::new(WebSearchTool));
-        registry.register(Arc::new(RunCommandTool::with_defaults(
-            self.ctx.work_dir.clone(),
-        )));
-        registry.register(Arc::new(ReadMemoryTool {
-            memory_store: self.ctx.memory_store.clone(),
-        }));
-        registry.register(Arc::new(WriteMemoryTool {
-            memory_store: self.ctx.memory_store.clone(),
-            agent_id: self.ctx.agent_id,
-        }));
-        registry.register(Arc::new(ListMemoryTool {
-            memory_store: self.ctx.memory_store.clone(),
-        }));
-        registry.register(Arc::new(GetTaskContextTool {
-            task_store: self.ctx.task_store.clone(),
-        }));
-        registry.register(Arc::new(ListCompletedTasksTool {
-            task_store: self.ctx.task_store.clone(),
-        }));
-
-        registry
+        DefaultToolsetBuilder::new()
+            .add_core_tools(
+                self.ctx.source_root.clone(),
+                self.ctx.work_dir.clone(),
+                CommandToolPolicy::Unrestricted,
+            )
+            .add_memory_tools(self.ctx.memory_store.clone(), self.ctx.agent_id)
+            .add_task_context_tools(self.ctx.task_store.clone())
+            .build()
     }
 
     pub async fn run(self) -> AgentResult {

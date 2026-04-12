@@ -7,9 +7,75 @@ pub const AGENT_DIR: &str = ".agent";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LlmProvider {
-    #[default]
     Claude,
+    #[default]
     OpenAi,
+}
+
+impl LlmProvider {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "claude" | "anthropic" => Some(Self::Claude),
+            "openai" | "open_ai" => Some(Self::OpenAi),
+            _ => None,
+        }
+    }
+
+    pub fn detect() -> Self {
+        if let Ok(raw) = std::env::var("LLM_PROVIDER") {
+            if let Some(provider) = Self::parse(&raw) {
+                return provider;
+            }
+        }
+
+        let has_openai = std::env::var("OPENAI_API_KEY")
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+        let has_anthropic = std::env::var("ANTHROPIC_API_KEY")
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+
+        match (has_openai, has_anthropic) {
+            (true, false) => Self::OpenAi,
+            (false, true) => Self::Claude,
+            _ => Self::default(),
+        }
+    }
+
+    pub fn api_key_env_var(&self) -> &'static str {
+        match self {
+            LlmProvider::Claude => "ANTHROPIC_API_KEY",
+            LlmProvider::OpenAi => "OPENAI_API_KEY",
+        }
+    }
+
+    pub fn base_url_env_var(&self) -> &'static str {
+        match self {
+            LlmProvider::Claude => "ANTHROPIC_API_BASE_URL",
+            LlmProvider::OpenAi => "OPENAI_API_BASE_URL",
+        }
+    }
+
+    pub fn model_env_var(&self) -> &'static str {
+        match self {
+            LlmProvider::Claude => "ANTHROPIC_MODEL",
+            LlmProvider::OpenAi => "OPENAI_MODEL",
+        }
+    }
+
+    pub fn default_base_url(&self) -> &'static str {
+        match self {
+            LlmProvider::Claude => "https://api.anthropic.com",
+            LlmProvider::OpenAi => "https://api.openai.com",
+        }
+    }
+
+    pub fn default_model(&self) -> &'static str {
+        match self {
+            LlmProvider::Claude => "claude-sonnet-4-20250514",
+            LlmProvider::OpenAi => "gpt-4o",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,17 +115,32 @@ fn default_retry_base_delay_ms() -> u64 {
 }
 
 impl LlmConfig {
+    pub fn resolved_provider(&self) -> LlmProvider {
+        self.provider.clone()
+    }
+
+    pub fn resolve_model(&self) -> String {
+        if !self.model.trim().is_empty() {
+            return self.model.clone();
+        }
+
+        let provider = self.resolved_provider();
+        std::env::var(provider.model_env_var())
+            .or_else(|_| std::env::var("LLM_MODEL"))
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| provider.default_model().to_string())
+    }
+
     pub fn resolve_api_key(&self) -> Option<String> {
         if let Some(ref key) = self.api_key {
             if !key.is_empty() {
                 return Some(key.clone());
             }
         }
-        let env_var = match self.provider {
-            LlmProvider::Claude => "ANTHROPIC_API_KEY",
-            LlmProvider::OpenAi => "OPENAI_API_KEY",
-        };
-        std::env::var(env_var).ok()
+        std::env::var(self.resolved_provider().api_key_env_var())
+            .ok()
+            .filter(|value| !value.trim().is_empty())
     }
 
     pub fn resolve_base_url(&self) -> String {
@@ -68,27 +149,26 @@ impl LlmConfig {
                 return url.clone();
             }
         }
-        let env_var = match self.provider {
-            LlmProvider::Claude => "ANTHROPIC_API_BASE_URL",
-            LlmProvider::OpenAi => "OPENAI_API_BASE_URL",
-        };
-        if let Ok(url) = std::env::var(env_var) {
+        let provider = self.resolved_provider();
+        if let Ok(url) = std::env::var(provider.base_url_env_var()) {
             if !url.is_empty() {
                 return url;
             }
         }
-        match self.provider {
-            LlmProvider::Claude => "https://api.anthropic.com".to_string(),
-            LlmProvider::OpenAi => "https://api.openai.com".to_string(),
-        }
+        provider.default_base_url().to_string()
     }
 }
 
 impl Default for LlmConfig {
     fn default() -> Self {
+        let provider = LlmProvider::detect();
         Self {
-            provider: LlmProvider::Claude,
-            model: "claude-sonnet-4-20250514".to_string(),
+            provider: provider.clone(),
+            model: std::env::var(provider.model_env_var())
+                .or_else(|_| std::env::var("LLM_MODEL"))
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| provider.default_model().to_string()),
             max_tokens: 4096,
             requests_per_minute: 50,
             tokens_per_minute: 80_000,
