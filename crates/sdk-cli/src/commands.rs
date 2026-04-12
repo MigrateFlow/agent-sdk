@@ -18,7 +18,7 @@ use console::style;
 
 use crate::compaction::compact_conversation;
 use crate::display::{display_path, format_token_count, print_task_list, truncate};
-use crate::session::{save_session, CliTask};
+use crate::session::CliTask;
 use sdk_core::error::{SdkError, SdkResult};
 use sdk_core::storage::AgentPaths;
 use sdk_core::types::chat::ChatMessage;
@@ -53,6 +53,9 @@ pub struct CommandContext<'a> {
     pub total_tokens: &'a mut u64,
     pub tool_calls: &'a mut usize,
     pub turns: &'a mut usize,
+    pub agent_mode: &'a mut sdk_core::AgentMode,
+    pub cache_state: Option<Arc<crate::cache_commands::CacheState>>,
+    pub ultra_plan: &'a mut Option<sdk_core::types::ultra_plan::UltraPlanState>,
 }
 
 impl<'a> CommandContext<'a> {
@@ -63,7 +66,12 @@ impl<'a> CommandContext<'a> {
             .lock()
             .map(|g| g.clone())
             .unwrap_or_default();
-        save_session(&self.session_path, self.messages, &tasks)?;
+        crate::session::save_session_with_mode(
+            &self.session_path,
+            self.messages,
+            &tasks,
+            self.agent_mode,
+        )?;
         Ok(())
     }
 }
@@ -129,6 +137,14 @@ impl SlashCommandRegistry {
         r.register(Arc::new(crate::session_commands::SessionsCommand));
         r.register(Arc::new(crate::session_commands::ResumeCommand));
         r.register(Arc::new(crate::session_commands::SessionDescribeCommand));
+        r.register(Arc::new(crate::plan_commands::PlanCommand));
+        r.register(Arc::new(crate::plan_commands::ExitPlanCommand));
+        r.register(Arc::new(crate::cache_commands::CacheCommand));
+        r.register(Arc::new(crate::cache_commands::CacheClearCommand));
+        r.register(Arc::new(crate::ultra_plan_commands::UltraPlanCommand));
+        r.register(Arc::new(crate::ultra_plan_commands::NextPhaseCommand));
+        r.register(Arc::new(crate::ultra_plan_commands::PhaseCommand));
+        r.register(Arc::new(crate::ultra_plan_commands::ExitUltraPlanCommand));
         r.register(Arc::new(QuitCommand));
         r
     }

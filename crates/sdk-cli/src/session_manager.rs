@@ -146,6 +146,8 @@ impl SessionManager {
             messages: Vec::new(),
             tasks: Vec::new(),
             metadata: Some(meta.clone()),
+            mode: sdk_core::types::agent_mode::AgentMode::Normal,
+            ultra_plan: None,
         };
 
         let json = serde_json::to_string(&session)

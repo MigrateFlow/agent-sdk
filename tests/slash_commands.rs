@@ -40,6 +40,8 @@ struct TestHarness {
     total_tokens: u64,
     tool_calls: usize,
     turns: usize,
+    agent_mode: agent_sdk::AgentMode,
+    ultra_plan: Option<agent_sdk::UltraPlanState>,
 }
 
 impl TestHarness {
@@ -57,6 +59,8 @@ impl TestHarness {
             total_tokens: 0,
             tool_calls: 0,
             turns: 0,
+            agent_mode: agent_sdk::AgentMode::Normal,
+            ultra_plan: None,
         }
     }
 
@@ -70,6 +74,9 @@ impl TestHarness {
             total_tokens: &mut self.total_tokens,
             tool_calls: &mut self.tool_calls,
             turns: &mut self.turns,
+            agent_mode: &mut self.agent_mode,
+            cache_state: None,
+            ultra_plan: &mut self.ultra_plan,
         }
     }
 }

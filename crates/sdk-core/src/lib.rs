@@ -10,6 +10,7 @@ pub mod memory;
 pub mod cost;
 pub mod hooks;
 pub mod background;
+pub mod cache;
 
 // Convenience re-exports
 pub use error::{AgentId, TaskId, SdkError, SdkResult};
@@ -20,6 +21,7 @@ pub use traits::prompt_builder::{PromptBuilder, DefaultPromptBuilder};
 pub use types::chat::ChatMessage;
 pub use types::task::{Task, TaskResult, TaskStatus};
 pub use types::usage::TokenUsage;
+pub use types::agent_mode::{AgentMode, PLAN_MODE_READONLY_TOOLS, is_plan_mode_tool, plan_mode_system_suffix};
 pub use types::memory::{MemoryEntry, MemoryType};
 pub use events::AgentEvent;
 pub use memory::MemoryStore;

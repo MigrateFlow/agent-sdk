@@ -6,6 +6,9 @@ rust-version = "1.78"
 license = "MIT"
 description = "Agent orchestration and loop for agent-orchestrator-sdk"
 
+[lib]
+doctest = false
+
 [dependencies]
 sdk-core = { workspace = true }
 sdk-llm = { workspace = true }

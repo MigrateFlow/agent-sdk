@@ -52,8 +52,8 @@ impl TeamResult {
 ///
 /// **You describe the team** — add teammates with roles, add tasks, and run:
 /// ```rust,no_run
-/// # use agent_sdk::agent::team::AgentTeam;
-/// # use agent_sdk::config::{LlmConfig, AgentConfig};
+/// # use sdk_agent::agent::team::AgentTeam;
+/// # use sdk_agent::config::{LlmConfig, AgentConfig};
 /// # async fn ex() -> anyhow::Result<()> {
 /// let result = AgentTeam::new(LlmConfig::default(), AgentConfig::default())
 ///     .add_teammate("security", "Review for security vulnerabilities")
@@ -65,8 +65,8 @@ impl TeamResult {
 ///
 /// **Single agent** — for simple tasks, skip the team entirely:
 /// ```rust,no_run
-/// # use agent_sdk::agent::team::AgentTeam;
-/// # use agent_sdk::config::{LlmConfig, AgentConfig};
+/// # use sdk_agent::agent::team::AgentTeam;
+/// # use sdk_agent::config::{LlmConfig, AgentConfig};
 /// # async fn ex() -> anyhow::Result<()> {
 /// let result = AgentTeam::new(LlmConfig::default(), AgentConfig::default())
 ///     .run_single("Explain this codebase")
@@ -144,8 +144,8 @@ impl AgentTeam {
     /// Add a named teammate with a specific role.
     ///
     /// ```rust,no_run
-    /// # use agent_sdk::agent::team::AgentTeam;
-    /// # use agent_sdk::config::{LlmConfig, AgentConfig};
+    /// # use sdk_agent::agent::team::AgentTeam;
+    /// # use sdk_agent::config::{LlmConfig, AgentConfig};
     /// AgentTeam::new(LlmConfig::default(), AgentConfig::default())
     ///     .add_teammate("security-reviewer", "Review for security vulnerabilities")
     ///     .add_teammate("perf-reviewer", "Review for performance issues");
@@ -182,9 +182,9 @@ impl AgentTeam {
     /// Add a task for the team to work on.
     ///
     /// ```rust,no_run
-    /// # use agent_sdk::agent::team::AgentTeam;
-    /// # use agent_sdk::config::{LlmConfig, AgentConfig};
-    /// # use agent_sdk::types::task::Task;
+    /// # use sdk_agent::agent::team::AgentTeam;
+    /// # use sdk_agent::config::{LlmConfig, AgentConfig};
+    /// # use sdk_agent::types::task::Task;
     /// let task1 = Task::new("gen", "Create config", "...", "config.rs");
     /// let task2 = Task::new("gen", "Create server", "...", "server.rs")
     ///     .with_dependencies(vec![task1.id]);
