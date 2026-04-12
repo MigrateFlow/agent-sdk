@@ -3,7 +3,7 @@ use console::style;
 use sdk_core::error::SdkResult;
 use sdk_core::types::ultra_plan::{UltraPlanPhase, UltraPlanState, next_phase};
 
-use crate::commands::{CommandContext, CommandOutcome, SlashCommand};
+use crate::commands::{CommandCategory, CommandContext, CommandOutcome, SlashCommand};
 
 /// `/ultraplan` -- enter UltraPlan mode at Research phase
 pub struct UltraPlanCommand;
@@ -12,6 +12,7 @@ pub struct UltraPlanCommand;
 impl SlashCommand for UltraPlanCommand {
     fn name(&self) -> &str { "ultraplan" }
     fn help(&self) -> &str { "enter structured planning mode (Research -> Design -> Review -> Implement)" }
+    fn category(&self) -> CommandCategory { CommandCategory::Planning }
 
     async fn execute(&self, ctx: &mut CommandContext<'_>, _args: &str) -> SdkResult<CommandOutcome> {
         if ctx.ultra_plan.is_some() {
@@ -43,6 +44,7 @@ pub struct NextPhaseCommand;
 impl SlashCommand for NextPhaseCommand {
     fn name(&self) -> &str { "nextphase" }
     fn help(&self) -> &str { "advance to next UltraPlan phase" }
+    fn category(&self) -> CommandCategory { CommandCategory::Planning }
 
     async fn execute(&self, ctx: &mut CommandContext<'_>, _args: &str) -> SdkResult<CommandOutcome> {
         let current_phase = match ctx.ultra_plan.as_ref() {
@@ -99,6 +101,7 @@ pub struct PhaseCommand;
 impl SlashCommand for PhaseCommand {
     fn name(&self) -> &str { "phase" }
     fn help(&self) -> &str { "show current UltraPlan phase" }
+    fn category(&self) -> CommandCategory { CommandCategory::Planning }
 
     async fn execute(&self, ctx: &mut CommandContext<'_>, _args: &str) -> SdkResult<CommandOutcome> {
         let state = match ctx.ultra_plan.as_ref() {
@@ -137,6 +140,7 @@ pub struct ExitUltraPlanCommand;
 impl SlashCommand for ExitUltraPlanCommand {
     fn name(&self) -> &str { "exitultraplan" }
     fn help(&self) -> &str { "exit UltraPlan mode" }
+    fn category(&self) -> CommandCategory { CommandCategory::Planning }
 
     async fn execute(&self, ctx: &mut CommandContext<'_>, _args: &str) -> SdkResult<CommandOutcome> {
         if ctx.ultra_plan.is_none() {

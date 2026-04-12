@@ -3,7 +3,7 @@ use console::style;
 use sdk_core::error::SdkResult;
 use sdk_core::types::agent_mode::AgentMode;
 
-use crate::commands::{CommandContext, CommandOutcome, SlashCommand};
+use crate::commands::{CommandCategory, CommandContext, CommandOutcome, SlashCommand};
 
 /// `/plan` — enter plan mode (read-only exploration).
 pub struct PlanCommand;
@@ -16,6 +16,10 @@ impl SlashCommand for PlanCommand {
 
     fn help(&self) -> &str {
         "enter plan mode (read-only exploration)"
+    }
+
+    fn category(&self) -> CommandCategory {
+        CommandCategory::Planning
     }
 
     async fn execute(
@@ -55,6 +59,10 @@ impl SlashCommand for ExitPlanCommand {
 
     fn help(&self) -> &str {
         "exit plan mode, return to normal"
+    }
+
+    fn category(&self) -> CommandCategory {
+        CommandCategory::Planning
     }
 
     async fn execute(

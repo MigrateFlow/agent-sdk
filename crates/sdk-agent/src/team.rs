@@ -159,6 +159,7 @@ impl AgentTeam {
             name: name.into(),
             prompt: prompt.into(),
             require_plan_approval: false,
+            isolation: None,
         });
         self
     }
@@ -175,6 +176,27 @@ impl AgentTeam {
             name: name.into(),
             prompt: prompt.into(),
             require_plan_approval: true,
+            isolation: None,
+        });
+        self
+    }
+
+    /// Add a teammate with explicit isolation mode.
+    ///
+    /// When `isolation` is `IsolationMode::Worktree`, the teammate runs in a
+    /// dedicated git worktree so its file-system changes are isolated from
+    /// other teammates.
+    pub fn add_teammate_with_isolation(
+        mut self,
+        name: impl Into<String>,
+        prompt: impl Into<String>,
+        isolation: crate::worktree::IsolationMode,
+    ) -> Self {
+        self.teammate_specs.push(TeammateSpec {
+            name: name.into(),
+            prompt: prompt.into(),
+            require_plan_approval: false,
+            isolation: Some(isolation),
         });
         self
     }

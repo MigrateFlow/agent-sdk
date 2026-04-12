@@ -12,6 +12,8 @@ pub enum AgentEvent {
     TeammateSpawned {
         agent_id: AgentId,
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree_path: Option<String>,
     },
 
     // --- Task lifecycle ---
@@ -149,6 +151,12 @@ pub enum AgentEvent {
         tool_calls: usize,
         /// The final content returned by the subagent (for display and result delivery).
         final_content: String,
+        /// Worktree path when the subagent ran in an isolated worktree and left changes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree_path: Option<String>,
+        /// Branch name containing the subagent's changes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
     },
     SubAgentFailed {
         agent_id: AgentId,

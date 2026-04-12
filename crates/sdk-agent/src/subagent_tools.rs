@@ -9,6 +9,7 @@ use uuid::Uuid;
 use sdk_core::background::{BackgroundResult, BackgroundResultKind};
 use sdk_core::events::AgentEvent;
 use crate::subagent::{SubAgentDef, SubAgentRegistry, SubAgentRunner};
+use crate::worktree::IsolationMode;
 use sdk_core::error::{SdkError, SdkResult};
 use sdk_core::traits::llm_client::LlmClient;
 use sdk_core::traits::tool::{Tool, ToolDefinition};
@@ -56,6 +57,9 @@ struct SubAgentRequest {
     /// Run in background (concurrent). Default: false (foreground/blocking).
     #[serde(default)]
     background: bool,
+    /// Isolation mode. Accepts "worktree" to run in a git worktree.
+    #[serde(default)]
+    isolation: Option<String>,
 }
 
 #[async_trait]
@@ -123,6 +127,11 @@ impl Tool for SpawnSubAgentTool {
                     "background": {
                         "type": "boolean",
                         "description": "If true, run the subagent in the background (concurrent). Default: false (blocking)."
+                    },
+                    "isolation": {
+                        "type": "string",
+                        "enum": ["none", "worktree"],
+                        "description": "Isolation mode. Use 'worktree' to run the subagent in an isolated git worktree so its file changes don't affect the main working tree. Default: 'none'."
                     }
                 },
                 "required": ["name", "prompt"]
@@ -140,6 +149,12 @@ impl Tool for SpawnSubAgentTool {
         if request.prompt.trim().is_empty() {
             return Ok(json!({ "error": "prompt cannot be empty" }));
         }
+
+        // Parse isolation mode from the request string.
+        let isolation = match request.isolation.as_deref() {
+            Some("worktree") => IsolationMode::Worktree,
+            _ => IsolationMode::None,
+        };
 
         // Resolve the subagent definition
         let def = if let Some(ref system_prompt) = request.system_prompt {
@@ -180,6 +195,9 @@ impl Tool for SpawnSubAgentTool {
                 )
             }));
         };
+
+        // Apply isolation mode from the request.
+        let def = def.with_isolation(isolation);
 
         let runner = SubAgentRunner::new(
             self.work_dir.clone(),
@@ -224,6 +242,8 @@ impl Tool for SpawnSubAgentTool {
                                 iterations: result.iterations,
                                 tool_calls: result.tool_calls_count,
                                 final_content: result.final_content,
+                                worktree_path: result.worktree_path,
+                                branch: result.worktree_branch,
                             });
                         }
                     }
@@ -257,15 +277,24 @@ impl Tool for SpawnSubAgentTool {
         } else {
             // Foreground (blocking) execution
             match runner.run(&def, &request.prompt).await {
-                Ok(result) => Ok(json!({
-                    "status": "completed",
-                    "name": result.name,
-                    "agent_id": result.agent_id.to_string(),
-                    "result": result.final_content,
-                    "total_tokens": result.total_tokens,
-                    "iterations": result.iterations,
-                    "tool_calls": result.tool_calls_count,
-                })),
+                Ok(result) => {
+                    let mut resp = json!({
+                        "status": "completed",
+                        "name": result.name,
+                        "agent_id": result.agent_id.to_string(),
+                        "result": result.final_content,
+                        "total_tokens": result.total_tokens,
+                        "iterations": result.iterations,
+                        "tool_calls": result.tool_calls_count,
+                    });
+                    if let Some(ref branch) = result.worktree_branch {
+                        resp["worktree_branch"] = json!(branch);
+                    }
+                    if let Some(ref wt_path) = result.worktree_path {
+                        resp["worktree_path"] = json!(wt_path);
+                    }
+                    Ok(resp)
+                }
                 Err(e) => Ok(json!({
                     "status": "failed",
                     "name": def.name,

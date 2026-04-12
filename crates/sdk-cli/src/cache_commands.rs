@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use console::style;
 
 use sdk_core::cache::{FileStateCache, StatsCache};
-use crate::commands::{CommandContext, CommandOutcome, SlashCommand};
-use crate::display::format_token_count;
+use crate::commands::{CommandCategory, CommandContext, CommandOutcome, SlashCommand};
+use crate::display::{format_bytes, format_token_count};
 use sdk_core::error::SdkResult;
 
 /// Shared cache state that can be attached to [`CommandContext`].
@@ -30,86 +30,90 @@ impl SlashCommand for CacheCommand {
         "show cache statistics and efficiency"
     }
 
+    fn category(&self) -> CommandCategory {
+        CommandCategory::Cache
+    }
+
     async fn execute(
         &self,
         ctx: &mut CommandContext<'_>,
         _args: &str,
     ) -> SdkResult<CommandOutcome> {
-        eprintln!();
-        eprintln!("  {}", style("Cache").bold());
+        let mut out = String::new();
+        out.push('\n');
+        out.push_str(&format!("  {}\n", style("Cache").bold()));
 
         match ctx.cache_state {
             Some(ref state) => {
                 // ── File state cache ──
                 let stats = state.file_cache.stats();
-                eprintln!();
-                eprintln!("  {}", style("File state cache").underlined());
-                eprintln!(
-                    "    entries: {} / {}",
+                out.push('\n');
+                out.push_str(&format!("  {}\n", style("File state cache").underlined()));
+                out.push_str(&format!(
+                    "    entries: {} / {}\n",
                     style(stats.entries).white(),
                     style(stats.max_entries).dim(),
-                );
-                eprintln!(
-                    "    memory:  {} / {}",
+                ));
+                out.push_str(&format!(
+                    "    memory:  {} / {}\n",
                     style(format_bytes(stats.total_bytes as u64)).white(),
                     style(format_bytes(stats.max_bytes as u64)).dim(),
-                );
+                ));
                 if stats.max_bytes > 0 {
                     let pct = (stats.total_bytes as f64 / stats.max_bytes as f64) * 100.0;
-                    eprintln!(
-                        "    usage:   {}",
+                    out.push_str(&format!(
+                        "    usage:   {}\n",
                         style(format!("{:.1}%", pct)).white(),
-                    );
+                    ));
                 }
 
                 // ── Persisted stats ──
                 let entries = StatsCache::load(&state.stats_path);
                 if !entries.is_empty() {
                     let summary = StatsCache::summary(&entries);
-                    eprintln!();
-                    eprintln!("  {}", style("Usage statistics").underlined());
-                    eprintln!(
-                        "    requests:    {}",
+                    out.push('\n');
+                    out.push_str(&format!("  {}\n", style("Usage statistics").underlined()));
+                    out.push_str(&format!(
+                        "    requests:    {}\n",
                         style(summary.total_requests).white(),
-                    );
-                    eprintln!(
-                        "    tokens in:   {}",
+                    ));
+                    out.push_str(&format!(
+                        "    tokens in:   {}\n",
                         style(format_token_count(summary.total_tokens_in)).white(),
-                    );
-                    eprintln!(
-                        "    tokens out:  {}",
+                    ));
+                    out.push_str(&format!(
+                        "    tokens out:  {}\n",
                         style(format_token_count(summary.total_tokens_out)).white(),
-                    );
-                    eprintln!(
-                        "    cache reads: {}",
+                    ));
+                    out.push_str(&format!(
+                        "    cache reads: {}\n",
                         style(format_token_count(summary.total_cache_reads)).white(),
-                    );
-                    eprintln!(
-                        "    est. cost:   {}",
+                    ));
+                    out.push_str(&format!(
+                        "    est. cost:   {}\n",
                         style(format!("${:.4}", summary.total_usd)).white(),
-                    );
-                    eprintln!(
-                        "    days:        {}",
+                    ));
+                    out.push_str(&format!(
+                        "    days:        {}\n",
                         style(summary.days_tracked).white(),
-                    );
+                    ));
                 } else {
-                    eprintln!();
-                    eprintln!(
-                        "    {}",
+                    out.push('\n');
+                    out.push_str(&format!(
+                        "    {}\n",
                         style("(no persisted usage stats yet)").dim(),
-                    );
+                    ));
                 }
             }
             None => {
-                eprintln!(
-                    "    {}",
+                out.push_str(&format!(
+                    "    {}\n",
                     style("cache state not available").dim(),
-                );
+                ));
             }
         }
 
-        eprintln!();
-        Ok(CommandOutcome::Continue)
+        Ok(CommandOutcome::Output(out))
     }
 }
 
@@ -126,44 +130,34 @@ impl SlashCommand for CacheClearCommand {
         "clear file state cache"
     }
 
+    fn category(&self) -> CommandCategory {
+        CommandCategory::Cache
+    }
+
     async fn execute(
         &self,
         ctx: &mut CommandContext<'_>,
         _args: &str,
     ) -> SdkResult<CommandOutcome> {
-        match ctx.cache_state {
+        let msg = match ctx.cache_state {
             Some(ref state) => {
                 let before = state.file_cache.stats().entries;
                 state.file_cache.clear();
-                eprintln!(
+                format!(
                     "  {} cleared {} cached file {}",
                     style("✓").green(),
                     before,
                     if before == 1 { "entry" } else { "entries" },
-                );
+                )
             }
             None => {
-                eprintln!(
+                format!(
                     "  {} {}",
                     style("!").yellow(),
                     style("cache state not available").dim(),
-                );
+                )
             }
-        }
-        eprintln!();
-        Ok(CommandOutcome::Continue)
-    }
-}
-
-/// Format a byte count as a human-readable string (e.g. "1.2 MB").
-fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * 1024;
-    if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
+        };
+        Ok(CommandOutcome::Output(msg))
     }
 }

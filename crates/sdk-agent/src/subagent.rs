@@ -7,7 +7,7 @@
 //!
 //! Subagents **cannot** spawn other subagents (no nesting).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use sdk_core::error::{AgentId, SdkResult};
 use crate::builder::{CommandToolPolicy, DefaultToolsetBuilder, ToolFilter};
+use crate::worktree::{self, IsolationMode};
 use sdk_core::registry::ToolRegistry;
 use sdk_core::traits::llm_client::LlmClient;
 
@@ -53,6 +54,9 @@ pub struct SubAgentDef {
     /// Whether to always run this subagent in the background.
     #[serde(default)]
     pub background: bool,
+    /// Isolation mode: run in the main working tree or a dedicated git worktree.
+    #[serde(default)]
+    pub isolation: IsolationMode,
 }
 
 fn default_max_turns() -> usize {
@@ -80,6 +84,7 @@ impl SubAgentDef {
             max_turns: default_max_turns(),
             max_context_tokens: default_max_context_tokens(),
             background: false,
+            isolation: IsolationMode::default(),
         }
     }
 
@@ -118,6 +123,12 @@ impl SubAgentDef {
         self.background = background;
         self
     }
+
+    /// Set the isolation mode (e.g. `IsolationMode::Worktree`).
+    pub fn with_isolation(mut self, mode: IsolationMode) -> Self {
+        self.isolation = mode;
+        self
+    }
 }
 
 /// Result returned when a subagent completes.
@@ -129,6 +140,12 @@ pub struct SubAgentResult {
     pub total_tokens: u64,
     pub iterations: usize,
     pub tool_calls_count: usize,
+    /// Branch name when the subagent ran in a worktree and left changes behind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
+    /// Worktree path when the subagent ran in a worktree and left changes behind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
 }
 
 impl From<(AgentId, &str, AgentLoopResult)> for SubAgentResult {
@@ -140,6 +157,8 @@ impl From<(AgentId, &str, AgentLoopResult)> for SubAgentResult {
             total_tokens: result.total_tokens,
             iterations: result.iterations,
             tool_calls_count: result.tool_calls_count,
+            worktree_branch: None,
+            worktree_path: None,
         }
     }
 }
@@ -186,6 +205,9 @@ impl SubAgentRunner {
     /// Run a subagent with the given definition and task prompt.
     ///
     /// Returns the subagent's result including final content and token usage.
+    /// When the definition uses `IsolationMode::Worktree`, the subagent runs
+    /// inside a dedicated git worktree and changes are preserved on a branch
+    /// for the user to merge.
     pub async fn run(
         &self,
         def: &SubAgentDef,
@@ -209,14 +231,27 @@ impl SubAgentRunner {
             description: def.description.clone(),
         });
 
-        // Build tool registry with restrictions
-        let tools = self.build_tools(def);
+        // Optionally create a worktree for isolation.
+        let wt_handle = if def.isolation == IsolationMode::Worktree {
+            Some(worktree::create_worktree(&self.source_root, agent_id, &def.name).await?)
+        } else {
+            None
+        };
+
+        // Determine effective work_dir (worktree path or the default).
+        let effective_work_dir = wt_handle
+            .as_ref()
+            .map(|h| h.path.clone())
+            .unwrap_or_else(|| self.work_dir.clone());
+
+        // Build tool registry with restrictions, using effective work_dir.
+        let tools = self.build_tools_with_work_dir(def, &effective_work_dir);
 
         // Build system prompt
         let system_prompt = sdk_core::prompts::subagent_system_prompt(
             &def.prompt,
             &self.source_root,
-            &self.work_dir,
+            &effective_work_dir,
         );
 
         let mut agent_loop = AgentLoop::new(
@@ -235,7 +270,19 @@ impl SubAgentRunner {
 
         match agent_loop.run(task_prompt.to_string()).await {
             Ok(loop_result) => {
-                let result = SubAgentResult::from((agent_id, def.name.as_str(), loop_result));
+                let mut result = SubAgentResult::from((agent_id, def.name.as_str(), loop_result));
+
+                // Handle worktree cleanup — preserve branch when there are changes.
+                if let Some(ref handle) = wt_handle {
+                    let has_changes = worktree::has_uncommitted_changes(&handle.path).await;
+                    if has_changes {
+                        result.worktree_branch = Some(handle.branch.clone());
+                        result.worktree_path = Some(
+                            handle.path.to_string_lossy().to_string(),
+                        );
+                    }
+                    worktree::cleanup_worktree(&self.source_root, handle, has_changes).await?;
+                }
 
                 self.emit(AgentEvent::SubAgentCompleted {
                     agent_id,
@@ -244,11 +291,18 @@ impl SubAgentRunner {
                     iterations: result.iterations,
                     tool_calls: result.tool_calls_count,
                     final_content: result.final_content.clone(),
+                    worktree_path: result.worktree_path.clone(),
+                    branch: result.worktree_branch.clone(),
                 });
 
                 Ok(result)
             }
             Err(e) => {
+                // Best-effort worktree cleanup on failure.
+                if let Some(ref handle) = wt_handle {
+                    let _ = worktree::cleanup_worktree(&self.source_root, handle, false).await;
+                }
+
                 self.emit(AgentEvent::SubAgentFailed {
                     agent_id,
                     name: def.name.clone(),
@@ -277,7 +331,8 @@ impl SubAgentRunner {
     }
 
     /// Build the tool registry for a subagent, respecting allowed/disallowed lists.
-    fn build_tools(&self, def: &SubAgentDef) -> ToolRegistry {
+    /// Accepts a `work_dir` so callers can point at a worktree path.
+    fn build_tools_with_work_dir(&self, def: &SubAgentDef, work_dir: &Path) -> ToolRegistry {
         let filter = if def.allowed_tools.is_empty() {
             ToolFilter::default()
         } else {
@@ -288,7 +343,7 @@ impl SubAgentRunner {
         DefaultToolsetBuilder::with_filter(filter)
             .add_core_tools(
                 self.source_root.clone(),
-                self.work_dir.clone(),
+                work_dir.to_path_buf(),
                 CommandToolPolicy::Unrestricted,
             )
             .build()
@@ -362,6 +417,7 @@ pub fn builtin_subagents() -> Vec<SubAgentDef> {
             max_turns: 20,
             max_context_tokens: 200_000,
             background: false,
+            isolation: IsolationMode::None,
         },
         SubAgentDef {
             name: "plan".to_string(),
@@ -390,6 +446,7 @@ pub fn builtin_subagents() -> Vec<SubAgentDef> {
             max_turns: 25,
             max_context_tokens: 200_000,
             background: false,
+            isolation: IsolationMode::None,
         },
         SubAgentDef {
             name: "general-purpose".to_string(),
@@ -407,6 +464,7 @@ pub fn builtin_subagents() -> Vec<SubAgentDef> {
             max_turns: 30,
             max_context_tokens: 200_000,
             background: false,
+            isolation: IsolationMode::None,
         },
         SubAgentDef {
             name: "code-reviewer".to_string(),
@@ -430,6 +488,7 @@ pub fn builtin_subagents() -> Vec<SubAgentDef> {
             max_turns: 20,
             max_context_tokens: 200_000,
             background: false,
+            isolation: IsolationMode::None,
         },
         SubAgentDef {
             name: "test-runner".to_string(),
@@ -453,6 +512,7 @@ pub fn builtin_subagents() -> Vec<SubAgentDef> {
             max_turns: 15,
             max_context_tokens: 200_000,
             background: false,
+            isolation: IsolationMode::None,
         },
         SubAgentDef {
             name: "refactor".to_string(),
@@ -466,6 +526,7 @@ pub fn builtin_subagents() -> Vec<SubAgentDef> {
             max_turns: 25,
             max_context_tokens: 200_000,
             background: false,
+            isolation: IsolationMode::None,
         },
     ]
 }

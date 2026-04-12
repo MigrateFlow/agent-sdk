@@ -31,6 +31,7 @@ pub struct TeammateSpec {
     pub name: String,
     pub prompt: String,
     pub require_plan_approval: bool,
+    pub isolation: Option<crate::worktree::IsolationMode>,
 }
 
 pub struct TeamLead {
@@ -93,14 +94,18 @@ impl TeamLead {
         // Map agent IDs to human-readable names for event display.
         let mut name_map = std::collections::HashMap::<AgentId, String>::new();
         let mut team_members = Vec::<TeamConfigMember>::new();
+        // Track worktree handles for cleanup during shutdown.
+        let mut worktree_handles = std::collections::HashMap::<AgentId, crate::worktree::WorktreeHandle>::new();
 
         let mut lead_mailbox = self.broker.team_lead_mailbox()?;
 
         // Spawn teammates: use explicit specs if provided, otherwise generic
         if !self.teammate_specs.is_empty() {
             for spec in &self.teammate_specs {
-                match self.spawn_named_teammate(spec).await {
+                match self.spawn_named_teammate(spec, &mut worktree_handles).await {
                     Ok(handle) => {
+                        let wt_path = worktree_handles.get(&handle.agent_id)
+                            .map(|h| h.path.to_string_lossy().to_string());
                         name_map.insert(handle.agent_id, handle.name.clone());
                         team_members.push(TeamConfigMember {
                             name: handle.name.clone(),
@@ -112,6 +117,7 @@ impl TeamLead {
                         self.emit(AgentEvent::TeammateSpawned {
                             agent_id: handle.agent_id,
                             name: handle.name.clone(),
+                            worktree_path: wt_path,
                         });
                         registry.register(handle);
                         agents_spawned += 1;
@@ -125,7 +131,7 @@ impl TeamLead {
             let initial_count = self.config.max_parallel_agents;
             for i in 0..initial_count {
                 let name = format!("teammate-{}", i + 1);
-                match self.spawn_teammate(&name, String::new(), false).await {
+                match self.spawn_teammate(&name, String::new(), false, None, &mut worktree_handles).await {
                     Ok(handle) => {
                         name_map.insert(handle.agent_id, handle.name.clone());
                         team_members.push(TeamConfigMember {
@@ -138,6 +144,7 @@ impl TeamLead {
                         self.emit(AgentEvent::TeammateSpawned {
                             agent_id: handle.agent_id,
                             name: handle.name.clone(),
+                            worktree_path: None,
                         });
                         registry.register(handle);
                         agents_spawned += 1;
@@ -260,7 +267,7 @@ impl TeamLead {
                 };
                 if active < max_agents && summary.pending > 0 {
                     let name = format!("teammate-{}", agents_spawned + 1);
-                    match self.spawn_teammate(&name, String::new(), false).await {
+                    match self.spawn_teammate(&name, String::new(), false, None, &mut worktree_handles).await {
                         Ok(handle) => {
                             name_map.insert(handle.agent_id, handle.name.clone());
                             team_members.push(TeamConfigMember {
@@ -273,6 +280,7 @@ impl TeamLead {
                             self.emit(AgentEvent::TeammateSpawned {
                                 agent_id: handle.agent_id,
                                 name: handle.name.clone(),
+                                worktree_path: None,
                             });
                             registry.register(handle);
                             agents_spawned += 1;
@@ -306,6 +314,16 @@ impl TeamLead {
         let final_results = registry.wait_all().await;
         for result in final_results.into_iter().flatten() {
             total_tokens += result.total_tokens_used;
+        }
+
+        // Clean up worktrees: preserve those with uncommitted changes.
+        for (_agent_id, handle) in &worktree_handles {
+            let has_changes = crate::worktree::has_uncommitted_changes(&handle.path).await;
+            if let Err(e) = crate::worktree::cleanup_worktree(&self.source_root, handle, has_changes).await {
+                warn!(path = %handle.path.display(), error = %e, "Failed to clean up worktree");
+            } else if has_changes {
+                info!(path = %handle.path.display(), branch = %handle.branch, "Worktree preserved (has uncommitted changes)");
+            }
         }
 
         let final_summary = self.task_store.summary()?;
@@ -383,6 +401,8 @@ impl TeamLead {
         name: &str,
         role_prompt: String,
         require_plan_approval: bool,
+        isolation: Option<crate::worktree::IsolationMode>,
+        worktree_handles: &mut std::collections::HashMap<AgentId, crate::worktree::WorktreeHandle>,
     ) -> SdkResult<AgentHandle> {
         let agent_id = Uuid::new_v4();
         self.broker.register_agent(agent_id)?;
@@ -395,6 +415,15 @@ impl TeamLead {
             format!("Team goal: {}\n\n{}", self.team_goal, role_prompt)
         };
 
+        let teammate_work_dir = if isolation == Some(crate::worktree::IsolationMode::Worktree) {
+            let handle = crate::worktree::create_worktree(&self.source_root, agent_id, name).await?;
+            let wt_path = handle.path.clone();
+            worktree_handles.insert(agent_id, handle);
+            wt_path
+        } else {
+            self.work_dir.clone()
+        };
+
         let ctx = AgentContext {
             agent_id,
             name: name.to_string(),
@@ -403,7 +432,7 @@ impl TeamLead {
             broker: self.broker.clone(),
             llm_client: self.llm_client.clone(),
             prompt_builder: self.prompt_builder.clone(),
-            work_dir: self.work_dir.clone(),
+            work_dir: teammate_work_dir,
             source_root: self.source_root.clone(),
             poll_interval_ms: self.config.poll_interval_ms,
             memory_store: self.memory_store.clone(),
@@ -428,11 +457,17 @@ impl TeamLead {
         Ok(AgentHandle::new(agent_id, teammate_name, handle))
     }
 
-    async fn spawn_named_teammate(&self, spec: &TeammateSpec) -> SdkResult<AgentHandle> {
+    async fn spawn_named_teammate(
+        &self,
+        spec: &TeammateSpec,
+        worktree_handles: &mut std::collections::HashMap<AgentId, crate::worktree::WorktreeHandle>,
+    ) -> SdkResult<AgentHandle> {
         self.spawn_teammate(
             &spec.name,
             spec.prompt.clone(),
             spec.require_plan_approval,
+            spec.isolation.clone(),
+            worktree_handles,
         )
             .await
     }

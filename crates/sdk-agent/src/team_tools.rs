@@ -59,6 +59,8 @@ struct TeammateRequest {
     role: String,
     #[serde(default)]
     require_plan_approval: bool,
+    #[serde(default)]
+    isolation: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,7 +95,8 @@ impl Tool for SpawnAgentTeamTool {
                             "properties": {
                                 "name": { "type": "string", "description": "Short name for the teammate (e.g. 'backend-dev', 'reviewer')" },
                                 "role": { "type": "string", "description": "Description of what this teammate should do" },
-                                "require_plan_approval": { "type": "boolean", "description": "If true, teammate must submit a plan before implementing" }
+                                "require_plan_approval": { "type": "boolean", "description": "If true, teammate must submit a plan before implementing" },
+                                "isolation": { "type": "string", "enum": ["none", "worktree"], "description": "Isolation mode: 'worktree' gives the teammate its own git worktree to prevent merge conflicts" }
                             },
                             "required": ["name", "role"]
                         }
@@ -195,10 +198,17 @@ impl Tool for SpawnAgentTeamTool {
         let teammate_specs: Vec<TeammateSpec> = request
             .teammates
             .iter()
-            .map(|t| TeammateSpec {
-                name: t.name.clone(),
-                prompt: t.role.clone(),
-                require_plan_approval: t.require_plan_approval,
+            .map(|t| {
+                let isolation = match t.isolation.as_deref() {
+                    Some("worktree") => Some(crate::worktree::IsolationMode::Worktree),
+                    _ => None,
+                };
+                TeammateSpec {
+                    name: t.name.clone(),
+                    prompt: t.role.clone(),
+                    require_plan_approval: t.require_plan_approval,
+                    isolation,
+                }
             })
             .collect();
 

@@ -121,7 +121,7 @@ fn git_branch(work_dir: &Path) -> Option<String> {
     }
 }
 
-fn print_welcome(model: &str, work_dir: &Path) {
+fn print_welcome(model: &str, work_dir: &Path, tool_count: usize) {
     let version = env!("CARGO_PKG_VERSION");
     let branch = git_branch(work_dir);
     let dir = display_path(work_dir);
@@ -134,16 +134,21 @@ fn print_welcome(model: &str, work_dir: &Path) {
     );
 
     let cwd_line = if let Some(ref b) = branch {
-        format!("{} ({})", dir, b)
+        format!("{} ({})", dir, style(b).cyan())
     } else {
         dir
     };
     eprintln!("   {} {}", style("cwd:").dim(), cwd_line);
-    eprintln!("   {} {}", style("model:").dim(), model);
+    eprintln!(
+        "   {} {} · {} tools",
+        style("model:").dim(),
+        model,
+        style(tool_count).dim(),
+    );
     eprintln!();
     eprintln!(
         "   {}",
-        style("Type /help for commands · Ctrl+C to interrupt · Ctrl+C twice to quit").dim()
+        style("/help for commands · Ctrl+C to interrupt · Ctrl+C twice to quit").dim()
     );
     eprintln!();
 }
@@ -233,6 +238,30 @@ fn format_tool_label(tool_name: &str, arguments: &str) -> String {
         }
         "update_task_list" => {
             format!("{}", style("Update Task List").bold())
+        }
+        "read_memory" => {
+            let key = arg_str(&args, "key").unwrap_or("?");
+            format!("{} {}", style("Read Memory").bold(), style(key).cyan())
+        }
+        "write_memory" => {
+            let key = arg_str(&args, "key").unwrap_or("?");
+            format!("{} {}", style("Write Memory").bold(), style(key).cyan())
+        }
+        "list_memory" => {
+            let prefix = arg_str(&args, "prefix").unwrap_or("");
+            if prefix.is_empty() {
+                format!("{}", style("List Memory").bold())
+            } else {
+                format!("{} {}", style("List Memory").bold(), style(prefix).cyan())
+            }
+        }
+        "search_memory" => {
+            let query = arg_str(&args, "query").unwrap_or("?");
+            format!("{} \"{}\"", style("Search Memory").bold(), style(query).white())
+        }
+        "delete_memory" => {
+            let key = arg_str(&args, "key").unwrap_or("?");
+            format!("{} {}", style("Delete Memory").bold(), style(key).cyan())
         }
         _ => {
             let name = humanize(tool_name);
@@ -352,6 +381,33 @@ fn format_result_preview(tool_name: &str, result: &str) -> String {
         "update_task_list" => {
             let count = val["count"].as_u64().unwrap_or(0);
             format!("{} tasks", count)
+        }
+        "read_memory" => {
+            let bytes = val["content"].as_str().map(|s| s.len()).unwrap_or(0);
+            if bytes > 0 {
+                format!("{} bytes", bytes)
+            } else {
+                "not found".to_string()
+            }
+        }
+        "write_memory" => {
+            let key = val["key"].as_str().unwrap_or("?");
+            format!("{} saved", key)
+        }
+        "list_memory" => {
+            let keys = val["keys"].as_array().map(|a| a.len()).unwrap_or(0);
+            format!("{} keys", keys)
+        }
+        "search_memory" => {
+            let results = val["results"].as_array().map(|a| a.len()).unwrap_or(0);
+            format!("{} results", results)
+        }
+        "delete_memory" => {
+            if val["deleted"].as_bool().unwrap_or(false) {
+                "deleted".to_string()
+            } else {
+                "not found".to_string()
+            }
         }
         _ => truncate(result, 80),
     }
@@ -1001,6 +1057,49 @@ async fn run_turn(
                                 }
                             }
                         }
+
+                        // Show edit_file diff preview
+                        if tc.function.name == "edit_file" {
+                            let args: serde_json::Value =
+                                serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                            let old = args["old_string"].as_str().unwrap_or("");
+                            let new = args["new_string"].as_str().unwrap_or("");
+                            if !old.is_empty() || !new.is_empty() {
+                                let old_lines: Vec<&str> = old.lines().collect();
+                                let new_lines: Vec<&str> = new.lines().collect();
+                                let max_preview = 4;
+                                let show_old = old_lines.len().min(max_preview);
+                                let show_new = new_lines.len().min(max_preview);
+                                for line in &old_lines[..show_old] {
+                                    eprintln!(
+                                        "  {} {}",
+                                        style("  │").dim(),
+                                        style(format!("- {}", truncate(line, 90))).red().dim()
+                                    );
+                                }
+                                if old_lines.len() > show_old {
+                                    eprintln!(
+                                        "  {} {}",
+                                        style("  │").dim(),
+                                        style(format!("  … +{} more", old_lines.len() - show_old)).dim()
+                                    );
+                                }
+                                for line in &new_lines[..show_new] {
+                                    eprintln!(
+                                        "  {} {}",
+                                        style("  │").dim(),
+                                        style(format!("+ {}", truncate(line, 90))).green().dim()
+                                    );
+                                }
+                                if new_lines.len() > show_new {
+                                    eprintln!(
+                                        "  {} {}",
+                                        style("  │").dim(),
+                                        style(format!("  … +{} more", new_lines.len() - show_new)).dim()
+                                    );
+                                }
+                            }
+                        }
                     }
 
                     let args: serde_json::Value =
@@ -1529,7 +1628,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── Interactive REPL ──
-    print_welcome(&model, &work_dir);
+    // Base tools: read_file, write_file, edit_file, list_directory, glob, grep,
+    // search_files, web_search, run_command, todo_write, update_task_list,
+    // spawn_agent_team, spawn_subagent = 13, plus MCP tools
+    let total_tools = 13 + mcp_tools.len();
+    print_welcome(&model, &work_dir, total_tools);
 
     let paths = agent_sdk::storage::AgentPaths::for_work_dir(&work_dir)?;
     let slash_registry = SlashCommandRegistry::builtin();
