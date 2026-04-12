@@ -1,3 +1,4 @@
+pub mod cache_policy;
 pub mod claude;
 pub mod openai;
 pub mod rate_limiter;
@@ -10,6 +11,7 @@ use sdk_core::config::{LlmConfig, LlmProvider};
 use sdk_core::error::SdkResult;
 use sdk_core::traits::llm_client::LlmClient;
 
+pub use cache_policy::{CacheMetrics, CachePolicy, format_cache_stats};
 pub use claude::ClaudeClient;
 pub use openai::OpenAiClient;
 
