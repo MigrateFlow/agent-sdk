@@ -3,43 +3,6 @@
 version = 3
 
 [[package]]
-name = "agent-orchestrator-sdk"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "console",
- "dirs",
- "dotenvy",
- "encoding_rs",
- "fs2",
- "futures-util",
- "glob",
- "indicatif",
- "lsp-types",
- "petgraph",
- "reqwest",
- "scraper",
- "sdk-agent",
- "sdk-cli",
- "sdk-core",
- "sdk-llm",
- "sdk-protocols",
- "sdk-task",
- "sdk-tools",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
