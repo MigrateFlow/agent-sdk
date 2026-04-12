@@ -359,7 +359,8 @@ impl OpenAiClient {
     }
 
     fn normalized_base_url(&self) -> &str {
-        self.base_url.strip_suffix("/v1").unwrap_or(&self.base_url)
+        let trimmed = self.base_url.trim_end_matches('/');
+        trimmed.strip_suffix("/v1").unwrap_or(trimmed)
     }
 
     async fn send_chat_stream(
