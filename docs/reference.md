@@ -37,6 +37,11 @@ From `src/lib.rs`:
 - `TaskId`
 - `SdkError`
 - `SdkResult`
+- `LspClient`
+- `ChildLspClient`
+- `LspConfig`
+- `LspManager`
+- `ServerSpec`
 
 ## `LlmProvider`
 
@@ -277,6 +282,23 @@ Team tools:
 - `ListMemoryTool`
 - `GetTaskContextTool`
 - `ListCompletedTasksTool`
+
+Language-server (LSP) tools:
+
+- `LspGotoDefinitionTool` (`lsp_goto_definition`) — params `{ file, line, column }` (0-indexed). Returns `{ "locations": [...] }`.
+- `LspFindReferencesTool` (`lsp_find_references`) — params `{ file, line, column, include_declaration?: bool }`. Returns `{ "locations": [...] }`.
+- `LspDocumentSymbolsTool` (`lsp_document_symbols`) — params `{ file }`. Returns `{ "symbols": [...] }` — either `DocumentSymbol[]` or `SymbolInformation[]` depending on server capabilities.
+
+Register them with `DefaultToolsetBuilder::add_lsp_tools(manifest_path, work_dir)`. The manifest at `.agent/lsp.json` maps a canonical language id to a server command:
+
+```json
+{
+  "rust":       { "command": "rust-analyzer", "args": [] },
+  "typescript": { "command": "typescript-language-server", "args": ["--stdio"] }
+}
+```
+
+Language is inferred from the file's extension (for example `.rs` -> `rust`, `.ts`/`.tsx` -> `typescript`, `.py` -> `python`). If no server is configured for the file's language, the tool returns a clear error; the SDK never auto-installs servers. If the manifest is missing, `add_lsp_tools` is a no-op.
 
 ## Persistent Components
 
