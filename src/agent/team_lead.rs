@@ -50,6 +50,10 @@ pub struct TeamLead {
     /// Named teammates to spawn. If empty, generic teammates are spawned
     /// up to `config.max_parallel_agents`.
     pub teammate_specs: Vec<TeammateSpec>,
+    /// High-level team goal threaded in from `AgentTeam::run(goal)`.
+    /// When non-empty, it is prepended to each teammate's role prompt so
+    /// every teammate sees the shared objective in its system prompt.
+    pub team_goal: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -376,10 +380,18 @@ impl TeamLead {
         let agent_id = Uuid::new_v4();
         self.broker.register_agent(agent_id)?;
 
+        let effective_role_prompt = if self.team_goal.is_empty() {
+            role_prompt
+        } else if role_prompt.trim().is_empty() {
+            format!("Team goal: {}", self.team_goal)
+        } else {
+            format!("Team goal: {}\n\n{}", self.team_goal, role_prompt)
+        };
+
         let ctx = AgentContext {
             agent_id,
             name: name.to_string(),
-            role_prompt,
+            role_prompt: effective_role_prompt,
             task_store: self.task_store.clone(),
             broker: self.broker.clone(),
             llm_client: self.llm_client.clone(),

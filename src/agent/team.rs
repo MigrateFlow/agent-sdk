@@ -199,7 +199,17 @@ impl AgentTeam {
 
     /// Run the team. The lead spawns teammates, they claim tasks from the
     /// shared task list, and work until all tasks are done.
-    pub async fn run(mut self, _goal: &str) -> SdkResult<TeamResult> {
+    ///
+    /// `goal` is the high-level objective for the team. It is threaded through
+    /// to every teammate's system prompt (as a `Team goal: <goal>` prefix) so
+    /// they share a common objective even when working different tasks.
+    ///
+    /// If no tasks have been pre-seeded via `add_task(...)` and `goal` is
+    /// non-empty, a single root task is created whose description is the
+    /// goal itself. This makes `run(goal)` usable without explicit tasks.
+    /// If tasks have been pre-seeded, `goal` never overwrites them — it only
+    /// becomes context in teammate system prompts.
+    pub async fn run(mut self, goal: &str) -> SdkResult<TeamResult> {
         let client = match self.llm_client.take() {
             Some(c) => c,
             None => crate::llm::create_client(&self.llm_config)?,
@@ -211,6 +221,13 @@ impl AgentTeam {
         let hooks = Arc::new(std::mem::take(&mut self.hooks));
         let task_store = Arc::new(TaskStore::new(paths.team_tasks_dir(&team_name)));
         task_store.init()?;
+
+        let goal_trimmed = goal.trim();
+        if self.tasks.is_empty() && !goal_trimmed.is_empty() {
+            self.tasks.push(
+                Task::new("goal", goal_trimmed, goal_trimmed, "").with_priority(0),
+            );
+        }
 
         // Add tasks to the store
         for task in &self.tasks {
@@ -246,6 +263,7 @@ impl AgentTeam {
             event_tx: self.event_tx.clone(),
             hooks,
             teammate_specs: self.teammate_specs.clone(),
+            team_goal: goal_trimmed.to_string(),
         };
 
         self.emit_event(AgentEvent::TeamSpawned {

@@ -52,6 +52,23 @@ let result = team.run("Document the SDK").await?;
 println!("tokens: {}", result.total_tokens());
 ```
 
+### What `goal` does
+
+The `goal` argument passed to `run(...)` is threaded into every teammate's
+system prompt as a `Team goal: <goal>` line, so teammates share a common
+objective even while working on different tasks.
+
+`goal` also participates in task seeding:
+
+- If no tasks have been added via `add_task(...)` and `goal` is non-empty,
+  a single root task is auto-seeded whose title and description are the
+  goal. This makes `run("do X")` usable with no explicit task list.
+- If tasks have already been added, `goal` is treated purely as shared
+  context for the teammates' system prompts. It never overwrites or
+  augments the pre-seeded task list.
+- An empty `goal` (`""`) and a non-empty task list is still valid and
+  preserves previous behavior.
+
 ## Result Types
 
 `AgentTeam::run(...)` returns `TeamResult`:
