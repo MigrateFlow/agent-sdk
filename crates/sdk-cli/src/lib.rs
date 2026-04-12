@@ -1,4 +1,5 @@
 pub mod cache_commands;
+pub mod ui;
 pub mod commands;
 pub mod compaction;
 pub mod display;

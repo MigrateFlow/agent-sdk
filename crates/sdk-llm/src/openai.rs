@@ -274,7 +274,11 @@ impl OpenAiClient {
             model: config.resolve_model(),
             max_tokens: config.max_tokens,
             base_url,
-            rate_limiter: RateLimiter::new(config.requests_per_minute),
+            rate_limiter: RateLimiter::with_config(
+                config.requests_per_minute,
+                config.rate_limit_burst_divisor,
+                config.rate_limit_min_interval_ms,
+            ),
             retry_config: RetryConfig::from_llm_config(config),
         })
     }

@@ -31,50 +31,45 @@ pub fn print_welcome(
     let branch = git_branch(work_dir);
     let dir = display_path(work_dir);
 
-    eprintln!();
-    eprintln!(
-        " {} {}",
-        style("✻").cyan().bold(),
-        style(format!("Agent v{}", version)).bold(),
-    );
-
     let cwd_line = if let Some(ref b) = branch {
-        format!("{} ({})", dir, style(b).cyan())
+        format!("{} {}", dir, style(format!("({})", b)).cyan())
     } else {
         dir
     };
-    eprintln!("   {} {}", style("cwd:").dim(), cwd_line);
-    eprintln!(
-        "   {} {} ({}) · {} tools",
-        style("model:").dim(),
-        model,
-        style(provider).dim(),
-        style(tool_count).dim(),
-    );
+
+    let mut header = vec![
+        format!("{} {}", style("✻").cyan().bold(), style(format!("Agent v{}", version)).bold()),
+        format!("{} {}", style("cwd:").dim(), cwd_line),
+        format!(
+            "{} {} ({}) · {} tools",
+            style("model:").dim(),
+            model,
+            style(provider).dim(),
+            style(tool_count).dim(),
+        ),
+    ];
     if mcp_count > 0 {
-        eprintln!(
-            "   {} {} server{}",
+        header.push(format!(
+            "{} {} server{}",
             style("mcp:").dim(),
             style(mcp_count).dim(),
             if mcp_count == 1 { "" } else { "s" },
-        );
+        ));
     }
     if let Some(id) = session_id {
-        eprintln!(
-            "   {} {}",
-            style("session:").dim(),
-            style(id).dim(),
-        );
+        header.push(format!("{} {}", style("session:").dim(), style(id).dim()));
     }
+
+    let footer = vec![
+        style("/help for commands · Ctrl+C to interrupt · Ctrl+C twice to quit").dim().to_string(),
+    ];
+
     eprintln!();
-    eprintln!(
-        "   {}",
-        style("/help for commands · Ctrl+C to interrupt · Ctrl+C twice to quit").dim()
-    );
-    eprintln!(
-        "   {}",
-        style("────────────────────────────────────────────────────").dim()
-    );
+    crate::ui::Panel::new()
+        .color(console::Color::Cyan)
+        .dim(true)
+        .indent(1)
+        .render_with_divider(&header, &footer);
     eprintln!();
 }
 
@@ -89,6 +84,72 @@ pub fn create_spinner(msg: &str) -> ProgressBar {
     pb.set_message(msg.to_string());
     pb.enable_steady_tick(std::time::Duration::from_millis(80));
     pb
+}
+
+const SPINNER_VERBS: &[&str] = &[
+    "Thinking…",
+    "Analyzing…",
+    "Reasoning…",
+    "Working…",
+    "Processing…",
+];
+
+/// A spinner that cycles through verb messages and can show a live token count.
+pub struct CyclingSpinner {
+    pb: ProgressBar,
+    cycle_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl CyclingSpinner {
+    pub fn new() -> Self {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+                .template("  {spinner:.dim} {msg:.dim}  {prefix:.dim}")
+                .unwrap(),
+        );
+        pb.set_message(SPINNER_VERBS[0].to_string());
+        pb.enable_steady_tick(std::time::Duration::from_millis(80));
+
+        let pb_clone = pb.clone();
+        let handle = tokio::spawn(async move {
+            let mut idx = 0usize;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                idx += 1;
+                pb_clone.set_message(SPINNER_VERBS[idx % SPINNER_VERBS.len()].to_string());
+            }
+        });
+
+        Self {
+            pb,
+            cycle_handle: Some(handle),
+        }
+    }
+
+    /// Update the token count shown next to the spinner.
+    pub fn set_tokens(&self, tokens: u64) {
+        if tokens > 0 {
+            self.pb.set_prefix(format!("↓{}", format_token_count(tokens)));
+        }
+    }
+
+    /// Clear the spinner and stop the cycling task.
+    pub fn finish_and_clear(&self) {
+        self.pb.finish_and_clear();
+        if let Some(ref h) = self.cycle_handle {
+            h.abort();
+        }
+    }
+}
+
+impl Drop for CyclingSpinner {
+    fn drop(&mut self) {
+        if let Some(h) = self.cycle_handle.take() {
+            h.abort();
+        }
+    }
 }
 
 /// Format a tool call for display (Claude Code style).
@@ -307,33 +368,42 @@ pub fn print_team_plan(arguments: &str) {
     let tasks = args["tasks"].as_array().cloned().unwrap_or_default();
     let auto_assign = args["auto_assign"].as_bool().unwrap_or(true);
 
+    let mut lines = Vec::new();
+
     if !teammates.is_empty() {
-        eprintln!("    {} {}", style("Teammates").dim(), style(format!("({})", teammates.len())).dim());
-        for (i, teammate) in teammates.iter().enumerate() {
+        lines.push(format!("{} {}", style("Teammates").dim(), style(format!("({})", teammates.len())).dim()));
+        for teammate in &teammates {
             let name = teammate["name"].as_str().unwrap_or("unnamed");
             let role = teammate["role"].as_str().unwrap_or("");
             let needs_plan = teammate["require_plan_approval"].as_bool().unwrap_or(false);
-            let connector = if i == teammates.len() - 1 && tasks.is_empty() { "⎿" } else { "│" };
             let suffix = if needs_plan { format!(" {}", style("[plan approval]").yellow()) } else { String::new() };
-            eprintln!("    {} {} {}{}", style(connector).dim(), style(name).magenta().bold(), style(truncate(role, 60)).dim(), suffix);
+            lines.push(format!("  {} {} {}{}", style("●").magenta(), style(name).magenta().bold(), style(truncate(role, 50)).dim(), suffix));
         }
     }
 
     if !tasks.is_empty() {
+        if !teammates.is_empty() { lines.push(String::new()); }
         let assign_label = if auto_assign { "auto-assign" } else { "claim freely" };
-        eprintln!("    {} {} ({})", style("│").dim(), style("Tasks").dim(), style(assign_label).dim());
+        lines.push(format!("{} ({})", style("Tasks").dim(), style(assign_label).dim()));
         for (idx, task) in tasks.iter().enumerate() {
             let title = task["title"].as_str().unwrap_or("untitled");
             let depends_on = task["depends_on"].as_array().cloned().unwrap_or_default();
-            let connector = if idx == tasks.len() - 1 { "⎿" } else { "│" };
             let dep_str = if depends_on.is_empty() {
                 String::new()
             } else {
                 let deps = depends_on.iter().filter_map(|v| v.as_u64()).map(|v| (v + 1).to_string()).collect::<Vec<_>>().join(", ");
                 format!(" {}", style(format!("[deps: {}]", deps)).dim())
             };
-            eprintln!("    {} {} {}{}", style(connector).dim(), style(format!("{}.", idx + 1)).magenta(), style(title).white(), dep_str);
+            lines.push(format!("  {} {}{}", style(format!("{}.", idx + 1)).magenta(), style(title).white(), dep_str));
         }
+    }
+
+    if !lines.is_empty() {
+        crate::ui::Panel::new()
+            .title(style("Team Plan").bold().to_string())
+            .color(console::Color::Magenta)
+            .indent(4)
+            .render(&lines);
     }
 }
 
@@ -342,14 +412,21 @@ pub fn print_team_result_summary(result: &str) {
     let assignments = val["task_assignments"].as_array().cloned().unwrap_or_default();
     if assignments.is_empty() { return; }
 
-    eprintln!("    {}", style("Assignments").dim());
-    for (idx, assignment) in assignments.iter().enumerate() {
-        let title = assignment["title"].as_str().unwrap_or("untitled");
-        let target = assignment["target_file"].as_str().unwrap_or("?");
-        let assignee = assignment["assigned_teammate"].as_str().unwrap_or("unassigned");
-        let connector = if idx == assignments.len() - 1 { "⎿" } else { "│" };
-        eprintln!("    {} {} {} {}", style(connector).dim(), style(title).white(), style(format!("→ {}", target)).dim(), style(format!("[{}]", assignee)).cyan());
-    }
+    let lines: Vec<String> = assignments
+        .iter()
+        .map(|assignment| {
+            let title = assignment["title"].as_str().unwrap_or("untitled");
+            let target = assignment["target_file"].as_str().unwrap_or("?");
+            let assignee = assignment["assigned_teammate"].as_str().unwrap_or("unassigned");
+            format!("{} {} {}", style(title).white(), style(format!("→ {}", target)).dim(), style(format!("[{}]", assignee)).cyan())
+        })
+        .collect();
+
+    crate::ui::Panel::new()
+        .title(style("Assignments").bold().to_string())
+        .color(console::Color::Magenta)
+        .indent(4)
+        .render(&lines);
 }
 
 pub fn arg_str<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
@@ -391,24 +468,29 @@ pub fn humanize(name: &str) -> String {
     if out.is_empty() { name.to_string() } else { out }
 }
 
-pub const MAX_TOOL_RESULT_CHARS: usize = 12_000;
+/// Maximum characters kept per tool result before truncation.
+/// Reads from [`sdk_core::config::CompactionConfig`] default.
+pub fn default_max_tool_result_chars() -> usize {
+    sdk_core::config::CompactionConfig::default().max_tool_result_chars
+}
 
 pub fn truncate_tool_result(s: &str) -> String {
-    if s.len() <= MAX_TOOL_RESULT_CHARS {
+    let max_chars = default_max_tool_result_chars();
+    if s.len() <= max_chars {
         return s.to_string();
     }
 
     if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(s) {
         if let Some(content) = val.get_mut("content") {
             if let Some(text) = content.as_str() {
-                if text.len() > MAX_TOOL_RESULT_CHARS - 200 {
-                    let limit = floor_char_boundary(text, MAX_TOOL_RESULT_CHARS - 200);
+                if text.len() > max_chars - 200 {
+                    let limit = floor_char_boundary(text, max_chars - 200);
                     let truncated = format!(
                         "{}…\n\n[truncated: {}/{} chars — use offset to read more]",
                         &text[..limit], limit, text.len()
                     );
                     *content = serde_json::Value::String(truncated);
-                    let fallback_end = floor_char_boundary(s, MAX_TOOL_RESULT_CHARS);
+                    let fallback_end = floor_char_boundary(s, max_chars);
                     return serde_json::to_string(&val)
                         .unwrap_or_else(|_| s[..fallback_end].to_string());
                 }
@@ -416,7 +498,7 @@ pub fn truncate_tool_result(s: &str) -> String {
         }
     }
 
-    let end = floor_char_boundary(s, MAX_TOOL_RESULT_CHARS);
+    let end = floor_char_boundary(s, max_chars);
     format!("{}…[truncated: {}/{} chars]", &s[..end], end, s.len())
 }
 

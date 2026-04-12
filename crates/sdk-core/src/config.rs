@@ -100,6 +100,24 @@ pub struct LlmConfig {
     /// Base delay in milliseconds for exponential back-off on retries.
     #[serde(default = "default_retry_base_delay_ms")]
     pub retry_base_delay_ms: u64,
+    /// Backoff multiplier for 429 rate-limit retries (exponential: base * 2^n * multiplier).
+    #[serde(default = "default_retry_rate_limit_multiplier")]
+    pub retry_rate_limit_multiplier: u64,
+    /// Backoff multiplier for 529 overload retries.
+    #[serde(default = "default_retry_overload_multiplier")]
+    pub retry_overload_multiplier: u64,
+    /// Backoff multiplier for 5xx server-error retries.
+    #[serde(default = "default_retry_server_error_multiplier")]
+    pub retry_server_error_multiplier: u64,
+    /// Divisor for computing burst size from requests_per_minute (burst = rpm / divisor).
+    #[serde(default = "default_rate_limit_burst_divisor")]
+    pub rate_limit_burst_divisor: u32,
+    /// Minimum interval in ms between rate-limited requests.
+    #[serde(default = "default_rate_limit_min_interval_ms")]
+    pub rate_limit_min_interval_ms: u64,
+    /// In-memory file cache settings.
+    #[serde(default)]
+    pub cache: CacheConfig,
 }
 
 fn default_http_timeout_secs() -> u64 {
@@ -112,6 +130,26 @@ fn default_max_retries() -> u32 {
 
 fn default_retry_base_delay_ms() -> u64 {
     1000
+}
+
+fn default_retry_rate_limit_multiplier() -> u64 {
+    2
+}
+
+fn default_retry_overload_multiplier() -> u64 {
+    5
+}
+
+fn default_retry_server_error_multiplier() -> u64 {
+    3
+}
+
+fn default_rate_limit_burst_divisor() -> u32 {
+    2
+}
+
+fn default_rate_limit_min_interval_ms() -> u64 {
+    100
 }
 
 impl LlmConfig {
@@ -177,6 +215,12 @@ impl Default for LlmConfig {
             http_timeout_secs: default_http_timeout_secs(),
             max_retries: default_max_retries(),
             retry_base_delay_ms: default_retry_base_delay_ms(),
+            retry_rate_limit_multiplier: default_retry_rate_limit_multiplier(),
+            retry_overload_multiplier: default_retry_overload_multiplier(),
+            retry_server_error_multiplier: default_retry_server_error_multiplier(),
+            rate_limit_burst_divisor: default_rate_limit_burst_divisor(),
+            rate_limit_min_interval_ms: default_rate_limit_min_interval_ms(),
+            cache: CacheConfig::default(),
         }
     }
 }
@@ -199,6 +243,18 @@ pub struct AgentConfig {
     /// Default timeout in seconds for `run_command` tool invocations.
     #[serde(default = "default_command_timeout_secs")]
     pub command_timeout_secs: u64,
+    /// Default maximum agentic turns for subagents.
+    #[serde(default = "default_subagent_max_turns")]
+    pub subagent_max_turns: usize,
+    /// Default maximum context tokens for subagents.
+    #[serde(default = "default_subagent_max_context_tokens")]
+    pub subagent_max_context_tokens: usize,
+    /// Context-window compaction parameters.
+    #[serde(default)]
+    pub compaction: CompactionConfig,
+    /// Limits for built-in tools (glob, grep, read_file).
+    #[serde(default)]
+    pub tool_limits: ToolLimitsConfig,
 }
 
 fn default_max_loop_iterations() -> usize {
@@ -221,6 +277,155 @@ fn default_command_timeout_secs() -> u64 {
     30
 }
 
+fn default_subagent_max_turns() -> usize {
+    100
+}
+
+fn default_subagent_max_context_tokens() -> usize {
+    200_000
+}
+
+/// Configuration for context-window compaction behaviour.
+///
+/// These thresholds control when and how aggressively the agent compacts
+/// its conversation history to stay within the context window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionConfig {
+    /// Characters per estimated token (used for rough size estimation).
+    #[serde(default = "CompactionConfig::default_chars_per_token")]
+    pub chars_per_token: usize,
+    /// Maximum characters kept per tool result before truncation.
+    #[serde(default = "CompactionConfig::default_max_tool_result_chars")]
+    pub max_tool_result_chars: usize,
+    /// Number of recent messages always preserved during compaction.
+    #[serde(default = "CompactionConfig::default_keep_recent")]
+    pub keep_recent: usize,
+    /// Overflow ratio above which summarization is triggered.
+    #[serde(default = "CompactionConfig::default_summarization_overflow_ratio")]
+    pub summarization_overflow_ratio: f64,
+    /// Fraction of max_context_tokens at which proactive compaction fires.
+    #[serde(default = "CompactionConfig::default_proactive_compaction_ratio")]
+    pub proactive_compaction_ratio: f64,
+
+    // ── Dynamic strategy selection thresholds ──
+
+    /// Overflow ratio for aggressive compaction.
+    #[serde(default = "CompactionConfig::default_aggressive_overflow_ratio")]
+    pub aggressive_overflow_ratio: f64,
+    /// Message count for aggressive compaction.
+    #[serde(default = "CompactionConfig::default_aggressive_message_count")]
+    pub aggressive_message_count: usize,
+    /// Tool-result ratio threshold (tool messages / total messages).
+    #[serde(default = "CompactionConfig::default_tool_ratio_threshold")]
+    pub tool_ratio_threshold: f64,
+    /// Overflow ratio when tool-heavy → aggressive.
+    #[serde(default = "CompactionConfig::default_tool_heavy_overflow_ratio")]
+    pub tool_heavy_overflow_ratio: f64,
+    /// Assistant ratio threshold for conservative strategy.
+    #[serde(default = "CompactionConfig::default_assistant_ratio_threshold")]
+    pub assistant_ratio_threshold: f64,
+    /// Overflow ratio below which conservative is used (assistant-heavy).
+    #[serde(default = "CompactionConfig::default_conservative_overflow_ratio")]
+    pub conservative_overflow_ratio: f64,
+    /// Overflow ratio above which default (vs conservative) is used.
+    #[serde(default = "CompactionConfig::default_default_overflow_ratio")]
+    pub default_overflow_ratio: f64,
+}
+
+impl CompactionConfig {
+    fn default_chars_per_token() -> usize { 4 }
+    fn default_max_tool_result_chars() -> usize { 12_000 }
+    fn default_keep_recent() -> usize { 10 }
+    fn default_summarization_overflow_ratio() -> f64 { 1.8 }
+    fn default_proactive_compaction_ratio() -> f64 { 0.80 }
+    fn default_aggressive_overflow_ratio() -> f64 { 1.8 }
+    fn default_aggressive_message_count() -> usize { 80 }
+    fn default_tool_ratio_threshold() -> f64 { 0.35 }
+    fn default_tool_heavy_overflow_ratio() -> f64 { 1.25 }
+    fn default_assistant_ratio_threshold() -> f64 { 0.45 }
+    fn default_conservative_overflow_ratio() -> f64 { 1.2 }
+    fn default_default_overflow_ratio() -> f64 { 1.35 }
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            chars_per_token: Self::default_chars_per_token(),
+            max_tool_result_chars: Self::default_max_tool_result_chars(),
+            keep_recent: Self::default_keep_recent(),
+            summarization_overflow_ratio: Self::default_summarization_overflow_ratio(),
+            proactive_compaction_ratio: Self::default_proactive_compaction_ratio(),
+            aggressive_overflow_ratio: Self::default_aggressive_overflow_ratio(),
+            aggressive_message_count: Self::default_aggressive_message_count(),
+            tool_ratio_threshold: Self::default_tool_ratio_threshold(),
+            tool_heavy_overflow_ratio: Self::default_tool_heavy_overflow_ratio(),
+            assistant_ratio_threshold: Self::default_assistant_ratio_threshold(),
+            conservative_overflow_ratio: Self::default_conservative_overflow_ratio(),
+            default_overflow_ratio: Self::default_default_overflow_ratio(),
+        }
+    }
+}
+
+/// Limits applied to built-in tools (glob, grep, read_file).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolLimitsConfig {
+    /// Maximum results returned by glob.
+    #[serde(default = "ToolLimitsConfig::default_glob_max_results")]
+    pub glob_max_results: usize,
+    /// Default head-limit for grep output.
+    #[serde(default = "ToolLimitsConfig::default_grep_head_limit")]
+    pub grep_head_limit: usize,
+    /// Maximum file size (bytes) grep will process.
+    #[serde(default = "ToolLimitsConfig::default_grep_max_file_size")]
+    pub grep_max_file_size: u64,
+    /// Default maximum lines returned by read_file.
+    #[serde(default = "ToolLimitsConfig::default_read_max_lines")]
+    pub read_max_lines: usize,
+}
+
+impl ToolLimitsConfig {
+    fn default_glob_max_results() -> usize { 200 }
+    fn default_grep_head_limit() -> usize { 250 }
+    fn default_grep_max_file_size() -> u64 { 1_048_576 }
+    fn default_read_max_lines() -> usize { 2000 }
+}
+
+impl Default for ToolLimitsConfig {
+    fn default() -> Self {
+        Self {
+            glob_max_results: Self::default_glob_max_results(),
+            grep_head_limit: Self::default_grep_head_limit(),
+            grep_max_file_size: Self::default_grep_max_file_size(),
+            read_max_lines: Self::default_read_max_lines(),
+        }
+    }
+}
+
+/// Configuration for the in-memory file cache.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheConfig {
+    /// Maximum number of entries in the file-state LRU cache.
+    #[serde(default = "CacheConfig::default_max_entries")]
+    pub max_entries: usize,
+    /// Maximum total bytes across all cached file contents.
+    #[serde(default = "CacheConfig::default_max_size_bytes")]
+    pub max_size_bytes: usize,
+}
+
+impl CacheConfig {
+    fn default_max_entries() -> usize { 100 }
+    fn default_max_size_bytes() -> usize { 25 * 1024 * 1024 }
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            max_entries: Self::default_max_entries(),
+            max_size_bytes: Self::default_max_size_bytes(),
+        }
+    }
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
@@ -232,6 +437,10 @@ impl Default for AgentConfig {
             max_idle_cycles: default_max_idle_cycles(),
             plan_approval_timeout_secs: default_plan_approval_timeout_secs(),
             command_timeout_secs: default_command_timeout_secs(),
+            subagent_max_turns: default_subagent_max_turns(),
+            subagent_max_context_tokens: default_subagent_max_context_tokens(),
+            compaction: CompactionConfig::default(),
+            tool_limits: ToolLimitsConfig::default(),
         }
     }
 }
@@ -417,6 +626,13 @@ mod tests {
         assert_eq!(cfg.http_timeout_secs, 300);
         assert_eq!(cfg.max_retries, 3);
         assert_eq!(cfg.retry_base_delay_ms, 1000);
+        assert_eq!(cfg.retry_rate_limit_multiplier, 2);
+        assert_eq!(cfg.retry_overload_multiplier, 5);
+        assert_eq!(cfg.retry_server_error_multiplier, 3);
+        assert_eq!(cfg.rate_limit_burst_divisor, 2);
+        assert_eq!(cfg.rate_limit_min_interval_ms, 100);
+        assert_eq!(cfg.cache.max_entries, 100);
+        assert_eq!(cfg.cache.max_size_bytes, 25 * 1024 * 1024);
     }
 
     #[test]
@@ -452,6 +668,7 @@ mod tests {
             http_timeout_secs: 1,
             max_retries: 0,
             retry_base_delay_ms: 0,
+            ..LlmConfig::default()
         };
         assert_eq!(cfg.resolved_provider(), LlmProvider::Claude);
     }
@@ -611,6 +828,19 @@ mod tests {
         assert_eq!(cfg.max_idle_cycles, 50);
         assert_eq!(cfg.plan_approval_timeout_secs, 300);
         assert_eq!(cfg.command_timeout_secs, 30);
+        assert_eq!(cfg.subagent_max_turns, 100);
+        assert_eq!(cfg.subagent_max_context_tokens, 200_000);
+        // CompactionConfig defaults
+        assert_eq!(cfg.compaction.chars_per_token, 4);
+        assert_eq!(cfg.compaction.max_tool_result_chars, 12_000);
+        assert_eq!(cfg.compaction.keep_recent, 10);
+        assert!((cfg.compaction.summarization_overflow_ratio - 1.8).abs() < 0.001);
+        assert!((cfg.compaction.proactive_compaction_ratio - 0.80).abs() < 0.001);
+        // ToolLimitsConfig defaults
+        assert_eq!(cfg.tool_limits.glob_max_results, 200);
+        assert_eq!(cfg.tool_limits.grep_head_limit, 250);
+        assert_eq!(cfg.tool_limits.grep_max_file_size, 1_048_576);
+        assert_eq!(cfg.tool_limits.read_max_lines, 2000);
     }
 
     #[test]

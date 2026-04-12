@@ -25,15 +25,21 @@ impl SlashCommand for UltraPlanCommand {
         *ctx.ultra_plan = Some(UltraPlanState::default());
         ctx.save()?;
 
-        Ok(CommandOutcome::Output(format!(
-            "\n  {} {}\n\n  {}\n  {}\n  {}\n  {}\n",
-            style("ok").green(),
-            style("UltraPlan activated").bold(),
-            style("Phase 1: Research").cyan().bold(),
-            style("  -> Read and explore the codebase").dim(),
-            style("  -> Identify all relevant files and patterns").dim(),
-            style("  -> Type /nextphase to advance to Design").dim(),
-        )))
+        let lines = vec![
+            format!("{} {}", style("ok").green(), style("UltraPlan activated").bold()),
+            String::new(),
+            format!("{}", style("Phase 1: Research").cyan().bold()),
+            format!("  {} Read and explore the codebase", style("→").dim()),
+            format!("  {} Identify all relevant files and patterns", style("→").dim()),
+            format!("  {} Type {} to advance to Design", style("→").dim(), style("/nextphase").cyan()),
+        ];
+        eprintln!();
+        crate::ui::Panel::new()
+            .title(style("UltraPlan").bold().to_string())
+            .color(console::Color::Yellow)
+            .indent(2)
+            .render(&lines);
+        Ok(CommandOutcome::Output(String::new()))
     }
 }
 
@@ -77,11 +83,18 @@ impl SlashCommand for NextPhaseCommand {
                 }
                 ctx.save()?;
 
-                Ok(CommandOutcome::Output(format!(
-                    "\n  {} {} (was: {})\n  {}\n",
-                    style("ok").green(),
+                // Visual phase transition
+                let transition = format!(
+                    "  {} {} {} {} {}",
+                    style("═══").dim(),
+                    style(&old_phase).dim(),
+                    style("──▸").cyan(),
                     style(format!("Phase {}: {}", phase_num, phase_name)).cyan().bold(),
-                    style(old_phase).dim(),
+                    style("═══").dim(),
+                );
+                Ok(CommandOutcome::Output(format!(
+                    "\n{}\n  {}\n",
+                    transition,
                     style(tools_note).dim(),
                 )))
             }
@@ -118,18 +131,32 @@ impl SlashCommand for PhaseCommand {
             ("Implement", UltraPlanPhase::Implement),
         ];
 
-        let mut output = String::new();
-        output.push_str(&format!("\n  {}\n\n", style("UltraPlan Progress").bold()));
+        let current_idx = phases.iter().position(|(_, p)| state.phase == *p).unwrap_or(0);
 
-        for (name, phase) in &phases {
+        let mut lines = Vec::new();
+        for (idx, (name, phase)) in phases.iter().enumerate() {
             let is_current = state.phase == *phase;
-            let marker = if is_current { style(">").cyan() } else { style(".").dim() };
-            let label = if is_current { style(*name).cyan().bold() } else { style(*name).dim() };
-            output.push_str(&format!("    {} {}\n", marker, label));
+            let is_done = idx < current_idx;
+            let (marker, label) = if is_done {
+                (style("✓").green().to_string(), style(*name).green().to_string())
+            } else if is_current {
+                let note = if *phase == UltraPlanPhase::Implement { "full tools" } else { "read-only" };
+                (style("●").cyan().to_string(), format!("{} {}", style(*name).cyan().bold(), style(format!("({})", note)).dim()))
+            } else {
+                (style("○").dim().to_string(), style(*name).dim().to_string())
+            };
+            lines.push(format!("{} {}", marker, label));
         }
-        output.push('\n');
+        lines.push(String::new());
+        lines.push(crate::ui::progress_bar(current_idx + 1, 4, 8));
 
-        Ok(CommandOutcome::Output(output))
+        eprintln!();
+        crate::ui::Panel::new()
+            .title(style("UltraPlan Progress").bold().to_string())
+            .color(console::Color::Yellow)
+            .indent(2)
+            .render(&lines);
+        Ok(CommandOutcome::Output(String::new()))
     }
 }
 

@@ -34,11 +34,7 @@ fn floor_char_boundary(s: &str, index: usize) -> usize {
 
 // ─── FileStateCache ────────────────────────────────────────────────────────
 
-/// Maximum number of entries kept in the LRU file cache.
-const MAX_ENTRIES: usize = 100;
-
-/// Maximum total byte size across all cached file contents (25 MB).
-const MAX_CACHE_SIZE_BYTES: usize = 25 * 1024 * 1024;
+use crate::config::CacheConfig;
 
 /// A single cached file entry.
 #[derive(Debug, Clone)]
@@ -60,21 +56,31 @@ pub struct CacheStats {
 /// In-memory LRU cache for file contents, keyed by canonical path.
 ///
 /// Lookups are validated against the current mtime so stale entries are
-/// automatically discarded.  When the cache exceeds [`MAX_ENTRIES`] or
-/// [`MAX_CACHE_SIZE_BYTES`] the least-recently-inserted entry is evicted.
+/// automatically discarded.  When the cache exceeds the configured
+/// `max_entries` or `max_size_bytes` the least-recently-inserted entry
+/// is evicted.
 pub struct FileStateCache {
     entries: Mutex<HashMap<PathBuf, CachedFile>>,
     order: Mutex<Vec<PathBuf>>,
     current_size: Mutex<usize>,
+    max_entries: usize,
+    max_size_bytes: usize,
 }
 
 impl FileStateCache {
-    /// Create an empty cache.
+    /// Create an empty cache with default limits.
     pub fn new() -> Self {
+        Self::with_config(CacheConfig::default())
+    }
+
+    /// Create an empty cache with explicit limits.
+    pub fn with_config(config: CacheConfig) -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
             order: Mutex::new(Vec::new()),
             current_size: Mutex::new(0),
+            max_entries: config.max_entries,
+            max_size_bytes: config.max_size_bytes,
         }
     }
 
@@ -127,7 +133,7 @@ impl FileStateCache {
         order.push(path.to_path_buf());
 
         // Evict oldest entries while over limits.
-        while (entries.len() > MAX_ENTRIES || *current_size > MAX_CACHE_SIZE_BYTES)
+        while (entries.len() > self.max_entries || *current_size > self.max_size_bytes)
             && !order.is_empty()
         {
             let oldest = order.remove(0);
@@ -174,8 +180,8 @@ impl FileStateCache {
         CacheStats {
             entries,
             total_bytes,
-            max_entries: MAX_ENTRIES,
-            max_bytes: MAX_CACHE_SIZE_BYTES,
+            max_entries: self.max_entries,
+            max_bytes: self.max_size_bytes,
         }
     }
 }
@@ -481,8 +487,8 @@ mod tests {
             let p = PathBuf::from(format!("/file_{}.txt", i));
             cache.put(&p, format!("content_{}", i), 1);
         }
-        // Should have evicted down to MAX_ENTRIES.
-        assert!(cache.stats().entries <= MAX_ENTRIES);
+        // Should have evicted down to default max_entries (100).
+        assert!(cache.stats().entries <= CacheConfig::default().max_entries);
     }
 
     #[test]

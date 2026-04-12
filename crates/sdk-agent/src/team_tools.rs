@@ -245,7 +245,6 @@ impl Tool for SpawnAgentTeamTool {
             prompt_builder: Arc::new(DefaultPromptBuilder),
             config: AgentConfig {
                 max_parallel_agents: teammate_count,
-                max_loop_iterations: 30,
                 max_task_retries: 2,
                 ..Default::default()
             },

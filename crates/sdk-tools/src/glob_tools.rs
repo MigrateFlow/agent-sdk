@@ -6,10 +6,18 @@ use serde_json::json;
 use sdk_core::error::{SdkError, SdkResult};
 use sdk_core::traits::tool::{Tool, ToolDefinition};
 
-const MAX_RESULTS: usize = 200;
-
 pub struct GlobTool {
     pub source_root: PathBuf,
+    pub max_results: usize,
+}
+
+impl GlobTool {
+    pub fn new(source_root: PathBuf) -> Self {
+        Self {
+            source_root,
+            max_results: sdk_core::config::ToolLimitsConfig::default().glob_max_results,
+        }
+    }
 }
 
 #[async_trait]
@@ -84,7 +92,7 @@ impl Tool for GlobTool {
         entries.sort_by(|a, b| b.1.cmp(&a.1));
 
         // Cap results
-        entries.truncate(MAX_RESULTS);
+        entries.truncate(self.max_results);
 
         let files: Vec<String> = entries
             .iter()

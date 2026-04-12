@@ -73,7 +73,7 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// Print the visible task list to stderr.
+/// Print the visible task list to stderr as a bordered panel.
 pub fn print_task_list(tasks: &[CliTask]) {
     if tasks.is_empty() {
         return;
@@ -82,9 +82,23 @@ pub fn print_task_list(tasks: &[CliTask]) {
     let completed = tasks.iter().filter(|t| t.status == "completed").count();
     let total = tasks.len();
 
-    eprintln!("  {} ({}/{})", style("Tasks").bold(), completed, total);
-    for task in tasks.iter() {
-        let (symbol, color) = task_status_display(&task.status);
-        eprintln!("    {} {}", symbol, style(&task.title).fg(color));
-    }
+    let lines: Vec<String> = tasks
+        .iter()
+        .map(|t| {
+            let (symbol, color) = task_status_display(&t.status);
+            format!("{} {}", symbol, style(&t.title).fg(color))
+        })
+        .collect();
+
+    let title = format!(
+        "{} ({}/{})",
+        style("Tasks").bold(),
+        completed,
+        total,
+    );
+    crate::ui::Panel::new()
+        .title(title)
+        .color(console::Color::Cyan)
+        .indent(2)
+        .render(&lines);
 }

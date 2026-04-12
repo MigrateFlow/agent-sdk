@@ -9,11 +9,20 @@ pub struct RateLimiter {
 
 impl RateLimiter {
     pub fn new(requests_per_minute: u32) -> Self {
-        let burst = (requests_per_minute as usize / 2).max(1);
+        Self::with_config(requests_per_minute, 2, 100)
+    }
+
+    /// Create a rate limiter with explicit burst divisor and minimum interval.
+    pub fn with_config(
+        requests_per_minute: u32,
+        burst_divisor: u32,
+        min_interval_ms: u64,
+    ) -> Self {
+        let burst = (requests_per_minute as usize / burst_divisor.max(1) as usize).max(1);
         let semaphore = Arc::new(Semaphore::new(burst));
 
         let sem_clone = semaphore.clone();
-        let interval_ms = (60_000 / requests_per_minute as u64).max(100);
+        let interval_ms = (60_000 / requests_per_minute as u64).max(min_interval_ms);
 
         let handle = tokio::spawn(async move {
             let mut interval = time::interval(Duration::from_millis(interval_ms));

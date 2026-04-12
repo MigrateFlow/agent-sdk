@@ -109,11 +109,6 @@ struct Usage {
     cache_read_input_tokens: Option<u64>,
 }
 
-impl Usage {
-    fn total_tokens(&self) -> u64 {
-        self.input_tokens + self.output_tokens
-    }
-}
 
 fn chat_messages_to_anthropic(messages: &[ChatMessage]) -> (Option<String>, Vec<AnthropicMessage>) {
     let mut system_prompt = None;
@@ -260,7 +255,11 @@ impl ClaudeClient {
             model: config.resolve_model(),
             max_tokens: config.max_tokens,
             base_url,
-            rate_limiter: RateLimiter::new(config.requests_per_minute),
+            rate_limiter: RateLimiter::with_config(
+                config.requests_per_minute,
+                config.rate_limit_burst_divisor,
+                config.rate_limit_min_interval_ms,
+            ),
             retry_config: RetryConfig::from_llm_config(config),
             cache_policy: CachePolicy::default(),
             cache_metrics: Arc::new(Mutex::new(CacheMetrics::default())),

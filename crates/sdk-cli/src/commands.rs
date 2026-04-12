@@ -228,9 +228,6 @@ impl SlashCommandRegistry {
 
     /// Render the help text shown by `/help`, grouped by category.
     pub fn help_text(&self) -> String {
-        let mut out = String::new();
-        out.push('\n');
-
         let longest = self
             .commands
             .iter()
@@ -238,7 +235,9 @@ impl SlashCommandRegistry {
             .max()
             .unwrap_or(0);
 
-        for cat in CommandCategory::all() {
+        let mut all_lines = Vec::new();
+
+        for (cat_idx, cat) in CommandCategory::all().iter().enumerate() {
             let cmds_in_cat: Vec<_> = self
                 .commands
                 .iter()
@@ -248,33 +247,44 @@ impl SlashCommandRegistry {
                 continue;
             }
 
-            out.push_str(&format!("  {}\n\n", style(cat.label()).bold()));
+            if cat_idx > 0 {
+                all_lines.push(String::new());
+            }
+            all_lines.push(format!("{}", style(cat.label()).bold()));
             for cmd in &cmds_in_cat {
                 let label = format!("/{}", cmd.name());
                 let padded = format!("{:width$}", label, width = longest);
-                out.push_str(&format!(
-                    "    {}  {}\n",
+                all_lines.push(format!(
+                    "  {}  {}",
                     style(padded).cyan(),
                     cmd.help(),
                 ));
             }
-            out.push('\n');
         }
 
-        out.push_str(&format!("  {}\n\n", style("Tips").bold()));
-        out.push_str(&format!(
-            "    End a line with {} for multi-line input\n",
+        all_lines.push(String::new());
+        all_lines.push(format!("{}", style("Tips").bold()));
+        all_lines.push(format!(
+            "  End a line with {} for multi-line input",
             style("\\").cyan()
         ));
-        out.push_str(&format!(
-            "    {} to interrupt, press twice to force-quit\n",
+        all_lines.push(format!(
+            "  {} to interrupt, press twice to force-quit",
             style("Ctrl+C").cyan()
         ));
-        out.push_str(&format!(
-            "    {} for one-shot mode\n",
+        all_lines.push(format!(
+            "  {} for one-shot mode",
             style("agent \"your prompt\"").cyan()
         ));
-        out
+
+        // Render via panel to stderr directly, return empty string
+        eprintln!();
+        crate::ui::Panel::new()
+            .title(style("Commands").bold().to_string())
+            .color(console::Color::Cyan)
+            .indent(2)
+            .render(&all_lines);
+        String::new()
     }
 }
 
@@ -453,20 +463,6 @@ impl SlashCommand for StatusCommand {
         _args: &str,
     ) -> SdkResult<CommandOutcome> {
         let session_file: &Path = ctx.session_path.as_path();
-        eprintln!();
-        eprintln!(
-            "  {} {}",
-            style("Session").bold(),
-            style(display_path(session_file)).dim(),
-        );
-        eprintln!(
-            "    {} · {} · {} tool {} · {} messages",
-            style(format!("{} turns", *ctx.turns)).white(),
-            style(format!("{} tokens", format_token_count(*ctx.total_tokens))).white(),
-            style(*ctx.tool_calls).white(),
-            if *ctx.tool_calls == 1 { "use" } else { "uses" },
-            style(ctx.messages.len()).dim(),
-        );
 
         // Show current mode
         let mode_str = if ctx.ultra_plan.is_some() {
@@ -478,28 +474,43 @@ impl SlashCommand for StatusCommand {
                 sdk_core::AgentMode::Normal => "normal".to_string(),
             }
         };
-        eprintln!(
-            "    {} {}",
-            style("mode:").dim(),
-            if mode_str == "normal" {
-                style(mode_str).dim()
-            } else {
-                style(mode_str).yellow()
-            },
-        );
+
+        let mut lines = vec![
+            format!(
+                "{} · {} · {} tool {} · {} messages",
+                style(format!("{} turns", *ctx.turns)).white(),
+                style(format!("{} tokens", format_token_count(*ctx.total_tokens))).white(),
+                style(*ctx.tool_calls).white(),
+                if *ctx.tool_calls == 1 { "use" } else { "uses" },
+                style(ctx.messages.len()).dim(),
+            ),
+            format!(
+                "{} {}",
+                style("mode:").dim(),
+                if mode_str == "normal" { style(mode_str).dim() } else { style(mode_str).yellow() },
+            ),
+        ];
 
         // Show cache stats if available
         if let Some(ref cache) = ctx.cache_state {
             let stats = cache.file_cache.stats();
             if stats.entries > 0 {
-                eprintln!(
-                    "    {} {} entries, {}",
+                lines.push(format!(
+                    "{} {} entries, {}",
                     style("cache:").dim(),
                     stats.entries,
                     style(format_bytes(stats.total_bytes as u64)).dim(),
-                );
+                ));
             }
         }
+
+        eprintln!();
+        let title = format!(
+            "{} {}",
+            style("Session").bold(),
+            style(display_path(session_file)).dim(),
+        );
+        crate::ui::Panel::new().title(title).color(console::Color::Cyan).render(&lines);
 
         let current = ctx
             .tasks
@@ -526,47 +537,49 @@ fn print_cost_summary(
         .map(|p| p.join("cost.jsonl"))
         .unwrap_or_else(|| PathBuf::from("cost.jsonl"));
 
-    eprintln!();
-    eprintln!(
-        "  {} {}",
-        style("Cost").bold(),
-        style(display_path(&cost_path)).dim(),
-    );
-
     let records = match sdk_core::cost::CostTracker::read_all(&cost_path) {
         Ok(r) => r,
         Err(e) => {
+            eprintln!();
             eprintln!("  {} could not read cost log: {}", style("!").yellow(), e);
             eprintln!();
             return;
         }
     };
 
+    let title = format!(
+        "{} {}",
+        style("Cost").bold(),
+        style(display_path(&cost_path)).dim(),
+    );
+
     if records.is_empty() {
-        eprintln!(
-            "    {} · {} · {} tool {}",
-            style(format!("{} turns", session_turns)).white(),
-            style(format!("{} tokens", format_token_count(session_tokens))).white(),
-            style(session_tool_calls).white(),
-            if session_tool_calls == 1 { "use" } else { "uses" },
-        );
-        eprintln!(
-            "    {}",
-            style("(no cost entries yet — start a turn to populate cost.jsonl)").dim(),
-        );
+        let lines = vec![
+            format!(
+                "{} · {} · {} tool {}",
+                style(format!("{} turns", session_turns)).white(),
+                style(format!("{} tokens", format_token_count(session_tokens))).white(),
+                style(session_tool_calls).white(),
+                if session_tool_calls == 1 { "use" } else { "uses" },
+            ),
+            style("(no cost entries yet — start a turn to populate cost.jsonl)").dim().to_string(),
+        ];
+        eprintln!();
+        crate::ui::Panel::new().title(title).color(console::Color::Cyan).render(&lines);
         eprintln!();
         return;
     }
 
-    eprintln!(
-        "    {:<28} {:>10} {:>10} {:>10} {:>10} {:>10}",
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "{:<28} {:>10} {:>10} {:>10} {:>10} {:>10}",
         style("model").dim(),
         style("in").dim(),
         style("out").dim(),
         style("cache_w").dim(),
         style("cache_r").dim(),
         style("usd").dim(),
-    );
+    ));
 
     let mut tot_in = 0u64;
     let mut tot_out = 0u64;
@@ -579,26 +592,28 @@ fn print_cost_summary(
         tot_cw += r.cache_in;
         tot_cr += r.cache_read;
         tot_usd += r.estimated_usd;
-        eprintln!(
-            "    {:<28} {:>10} {:>10} {:>10} {:>10} {:>10.4}",
+        lines.push(format!(
+            "{:<28} {:>10} {:>10} {:>10} {:>10} {:>10.4}",
             truncate(&r.model, 28),
             format_token_count(r.tokens_in),
             format_token_count(r.tokens_out),
             format_token_count(r.cache_in),
             format_token_count(r.cache_read),
             r.estimated_usd,
-        );
+        ));
     }
-
-    eprintln!(
-        "    {:<28} {:>10} {:>10} {:>10} {:>10} {:>10.4}",
+    lines.push(format!(
+        "{:<28} {:>10} {:>10} {:>10} {:>10} {:>10.4}",
         style("total").bold().to_string(),
         format_token_count(tot_in),
         format_token_count(tot_out),
         format_token_count(tot_cw),
         format_token_count(tot_cr),
         tot_usd,
-    );
+    ));
+
+    eprintln!();
+    crate::ui::Panel::new().title(title).color(console::Color::Cyan).render(&lines);
     eprintln!();
 }
 

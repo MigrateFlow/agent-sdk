@@ -146,12 +146,8 @@ impl DefaultToolsetBuilder {
             source_root: source_root.clone(),
             work_dir: work_dir.clone(),
         });
-        self.register(GlobTool {
-            source_root: source_root.clone(),
-        });
-        self.register(GrepTool {
-            source_root: source_root.clone(),
-        });
+        self.register(GlobTool::new(source_root.clone()));
+        self.register(GrepTool::new(source_root.clone()));
         self.register(SearchFilesTool { source_root });
         self.register(WebSearchTool);
 

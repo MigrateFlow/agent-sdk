@@ -60,11 +60,11 @@ pub struct SubAgentDef {
 }
 
 fn default_max_turns() -> usize {
-    30
+    sdk_core::config::AgentConfig::default().subagent_max_turns
 }
 
 fn default_max_context_tokens() -> usize {
-    200_000
+    sdk_core::config::AgentConfig::default().subagent_max_context_tokens
 }
 
 impl SubAgentDef {

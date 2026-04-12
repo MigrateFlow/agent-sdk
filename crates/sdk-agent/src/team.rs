@@ -313,10 +313,7 @@ impl AgentTeam {
             team_goal: goal_trimmed.to_string(),
         };
 
-        self.emit_event(AgentEvent::TeamSpawned {
-            teammate_count: self.teammate_specs.len().max(self.agent_config.max_parallel_agents),
-        });
-
+        // TeamSpawned is emitted by the TeamLead after it has the accurate count.
         lead.run().await.map(TeamResult::Team)
     }
 
@@ -346,7 +343,8 @@ impl AgentTeam {
             tools,
             system,
             self.agent_config.max_loop_iterations,
-        );
+        )
+        .with_compaction_config(self.agent_config.compaction.clone());
 
         if let Some(ref tx) = self.event_tx {
             agent.set_event_sink(tx.clone());

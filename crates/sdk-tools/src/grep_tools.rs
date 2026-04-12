@@ -6,11 +6,21 @@ use serde_json::json;
 use sdk_core::error::{SdkError, SdkResult};
 use sdk_core::traits::tool::{Tool, ToolDefinition};
 
-const DEFAULT_HEAD_LIMIT: usize = 250;
-const MAX_FILE_SIZE: u64 = 1_048_576; // 1 MB
-
 pub struct GrepTool {
     pub source_root: PathBuf,
+    pub default_head_limit: usize,
+    pub max_file_size: u64,
+}
+
+impl GrepTool {
+    pub fn new(source_root: PathBuf) -> Self {
+        let defaults = sdk_core::config::ToolLimitsConfig::default();
+        Self {
+            source_root,
+            default_head_limit: defaults.grep_head_limit,
+            max_file_size: defaults.grep_max_file_size,
+        }
+    }
 }
 
 /// Check if a file is likely binary by reading the first 512 bytes.
@@ -27,9 +37,9 @@ fn is_likely_binary(path: &std::path::Path) -> bool {
 }
 
 /// Walk a directory recursively, collecting file paths that pass filters.
-fn walk_files(root: &std::path::Path, file_glob: Option<&glob::Pattern>) -> Vec<PathBuf> {
+fn walk_files(root: &std::path::Path, file_glob: Option<&glob::Pattern>, max_file_size: u64) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    walk_files_inner(root, root, file_glob, &mut files);
+    walk_files_inner(root, root, file_glob, max_file_size, &mut files);
     files
 }
 
@@ -37,6 +47,7 @@ fn walk_files_inner(
     current: &std::path::Path,
     root: &std::path::Path,
     file_glob: Option<&glob::Pattern>,
+    max_file_size: u64,
     out: &mut Vec<PathBuf>,
 ) {
     let Ok(entries) = std::fs::read_dir(current) else {
@@ -56,7 +67,7 @@ fn walk_files_inner(
         }
 
         if path.is_dir() {
-            walk_files_inner(&path, root, file_glob, out);
+            walk_files_inner(&path, root, file_glob, max_file_size, out);
         } else if path.is_file() {
             // Apply glob filter on relative path
             if let Some(pattern) = file_glob {
@@ -69,7 +80,7 @@ fn walk_files_inner(
 
             // Skip large and binary files
             if let Ok(meta) = path.metadata() {
-                if meta.len() > MAX_FILE_SIZE {
+                if meta.len() > max_file_size {
                     continue;
                 }
             }
@@ -172,7 +183,7 @@ impl Tool for GrepTool {
             .unwrap_or("files_with_matches");
         let head_limit = arguments["head_limit"]
             .as_u64()
-            .unwrap_or(DEFAULT_HEAD_LIMIT as u64) as usize;
+            .unwrap_or(self.default_head_limit as u64) as usize;
         let sub_path = arguments["path"].as_str().unwrap_or("");
         let file_glob_str = arguments["glob"].as_str();
 
@@ -192,7 +203,7 @@ impl Tool for GrepTool {
             return Ok(json!({ "error": format!("Directory not found: {}", sub_path) }));
         }
 
-        let files = walk_files(&search_root, file_glob.as_ref());
+        let files = walk_files(&search_root, file_glob.as_ref(), self.max_file_size);
 
         match output_mode {
             "content" => {

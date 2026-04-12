@@ -19,6 +19,7 @@ use sdk_core::types::ultra_plan::{UltraPlanState, allowed_tools_for_phase, phase
 
 use sdk_cli::cache_commands::CacheState;
 use sdk_cli::commands::{CommandContext, CommandOutcome, SlashCommandRegistry};
+use sdk_cli::compaction::compact_conversation;
 use sdk_cli::display::{format_token_count, print_task_list};
 use sdk_cli::event_handler::run_event_handler;
 use sdk_cli::format::{print_usage, print_welcome};
@@ -356,6 +357,31 @@ async fn main() -> anyhow::Result<()> {
         } else if agent_mode == AgentMode::Plan {
             Some(PLAN_MODE_READONLY_TOOLS.iter().map(|s| s.to_string()).collect())
         } else { None };
+
+        // ── Auto-compaction before turn: compact when context approaches limit ──
+        {
+            let compaction_cfg = sdk_core::config::CompactionConfig::default();
+            let max_ctx = llm_config.max_tokens.max(sdk_core::config::AgentConfig::default().max_context_tokens);
+            let estimated_tokens: usize = messages
+                .iter()
+                .map(|m| m.char_len() / compaction_cfg.chars_per_token.max(1))
+                .sum();
+            let threshold = (max_ctx as f64 * compaction_cfg.proactive_compaction_ratio) as usize;
+            if estimated_tokens > threshold {
+                let before = messages.len();
+                let (freed, strategy) = compact_conversation(&mut messages);
+                if freed > 0 {
+                    let after = messages.len();
+                    eprintln!(
+                        "  {} {}→{} messages ({} freed, {})",
+                        style("↻").dim(),
+                        before, after,
+                        freed,
+                        style(strategy).dim(),
+                    );
+                }
+            }
+        }
 
         let stats = run_turn(
             &mut messages, &input, &llm_client, &llm_config, &work_dir,

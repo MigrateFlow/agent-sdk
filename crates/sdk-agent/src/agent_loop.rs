@@ -7,6 +7,7 @@ use std::time::Instant;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, info, warn};
 
+use sdk_core::config::CompactionConfig;
 use sdk_core::error::{AgentId, SdkError, SdkResult};
 use sdk_core::types::chat::ChatMessage;
 use sdk_core::traits::llm_client::LlmClient;
@@ -16,10 +17,7 @@ use sdk_core::events::AgentEvent;
 use sdk_core::hooks::{HookEvent, HookRegistry, HookResult};
 pub use sdk_core::background::{BackgroundResult, BackgroundResultKind};
 
-const CHARS_PER_ESTIMATED_TOKEN: usize = 4;
 const DEFAULT_MAX_CONTEXT_TOKENS: usize = 200_000;
-const MAX_TOOL_RESULT_CHARS: usize = 12_000;
-const COMPACT_KEEP_RECENT: usize = 10;
 
 /// System prompt used when spawning a background summarization subagent.
 const SUMMARIZER_SYSTEM: &str =
@@ -27,15 +25,6 @@ const SUMMARIZER_SYSTEM: &str =
      the provided conversation window. Preserve decisions, intents, entities, \
      file paths, tool results, and open questions. Prefer bullet points. \
      Do not invent information. Do not include preambles like \"Here is a summary\".";
-
-/// Overflow ratio above which summarization is warranted even when the
-/// configured strategy is not explicitly aggressive.
-const SUMMARIZATION_OVERFLOW_RATIO: f64 = 1.8;
-
-/// Proactive compaction triggers at this fraction of max_context_tokens,
-/// before the context actually overflows. Uses a gentle Conservative
-/// profile to avoid degrading quality.
-const PROACTIVE_COMPACTION_RATIO: f64 = 0.80;
 
 #[derive(Debug)]
 pub struct AgentLoopResult {
@@ -82,7 +71,7 @@ struct CompactionProfile {
 
 impl CompactionProfile {
     const DEFAULT: Self = Self {
-        keep_recent: COMPACT_KEEP_RECENT,
+        keep_recent: 10,
         tool_result_chars_limit: 200,
         assistant_content_limit: 500,
         fallback_truncate_chars: 2000,
@@ -118,6 +107,7 @@ pub struct AgentLoop {
     tool_calls_count: usize,
     event_tx: Option<UnboundedSender<AgentEvent>>,
     compaction_strategy: CompactionStrategy,
+    compaction_config: CompactionConfig,
     /// Receives results from background subagents / teams.
     /// Drained before each LLM call and injected as user messages.
     background_rx: Option<UnboundedReceiver<BackgroundResult>>,
@@ -156,6 +146,7 @@ impl AgentLoop {
             tool_calls_count: 0,
             event_tx: None,
             compaction_strategy: CompactionStrategy::default(),
+            compaction_config: CompactionConfig::default(),
             background_rx: None,
             background_tx: None,
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
@@ -172,6 +163,12 @@ impl AgentLoop {
     /// Set the compaction strategy to use.
     pub fn with_compaction_strategy(mut self, strategy: CompactionStrategy) -> Self {
         self.compaction_strategy = strategy;
+        self
+    }
+
+    /// Set compaction configuration (thresholds, limits, ratios).
+    pub fn with_compaction_config(mut self, config: CompactionConfig) -> Self {
+        self.compaction_config = config;
         self
     }
 
@@ -201,6 +198,7 @@ impl AgentLoop {
             tool_calls_count: 0,
             event_tx: None,
             compaction_strategy: CompactionStrategy::default(),
+            compaction_config: CompactionConfig::default(),
             background_rx: None,
             background_tx: None,
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
@@ -401,7 +399,7 @@ impl AgentLoop {
                             Ok(Ok(val)) => {
                                 let preview = build_result_preview(&val);
                                 let full = serde_json::to_string(&val).unwrap_or_default();
-                                (truncate_tool_result(&full), preview)
+                                (truncate_tool_result(&full, self.compaction_config.max_tool_result_chars), preview)
                             }
                             Ok(Err(e)) => {
                                 let err = serde_json::json!({"error": e.to_string()}).to_string();
@@ -507,14 +505,14 @@ impl AgentLoop {
     fn estimate_context_tokens(&self) -> usize {
         self.messages
             .iter()
-            .map(|m| m.char_len().div_ceil(CHARS_PER_ESTIMATED_TOKEN))
+            .map(|m| m.char_len().div_ceil(self.compaction_config.chars_per_token))
             .sum()
     }
 
     fn compact_if_needed(&mut self) {
         let size = self.estimate_context_tokens();
         let proactive_threshold =
-            (self.max_context_tokens as f64 * PROACTIVE_COMPACTION_RATIO) as usize;
+            (self.max_context_tokens as f64 * self.compaction_config.proactive_compaction_ratio) as usize;
 
         if size <= proactive_threshold {
             return;
@@ -625,7 +623,7 @@ impl AgentLoop {
     ) -> bool {
         let overflow = size as f64 / self.max_context_tokens.max(1) as f64;
         matches!(selected, CompactionStrategy::Aggressive)
-            || overflow >= SUMMARIZATION_OVERFLOW_RATIO
+            || overflow >= self.compaction_config.summarization_overflow_ratio
     }
 
     /// Attempt to spawn the background summarization task. Returns `false` if
@@ -741,7 +739,7 @@ impl AgentLoop {
     /// empty or degenerate.
     fn select_summarize_window(&self) -> Option<SummarizeWindow> {
         let total = self.messages.len();
-        let keep = COMPACT_KEEP_RECENT;
+        let keep = self.compaction_config.keep_recent;
         if total <= keep + 2 {
             return None;
         }
@@ -772,23 +770,25 @@ impl AgentLoop {
         let tool_ratio = tool_count as f64 / total as f64;
         let assistant_ratio = assistant_count as f64 / total as f64;
 
-        if overflow_ratio >= 1.8 || total >= 80 {
+        let cc = &self.compaction_config;
+
+        if overflow_ratio >= cc.aggressive_overflow_ratio || total >= cc.aggressive_message_count {
             return CompactionStrategy::Aggressive;
         }
 
-        if tool_ratio >= 0.35 {
-            return if overflow_ratio >= 1.25 {
+        if tool_ratio >= cc.tool_ratio_threshold {
+            return if overflow_ratio >= cc.tool_heavy_overflow_ratio {
                 CompactionStrategy::Aggressive
             } else {
                 CompactionStrategy::Default
             };
         }
 
-        if assistant_ratio >= 0.45 && overflow_ratio < 1.2 {
+        if assistant_ratio >= cc.assistant_ratio_threshold && overflow_ratio < cc.conservative_overflow_ratio {
             return CompactionStrategy::Conservative;
         }
 
-        if overflow_ratio >= 1.35 {
+        if overflow_ratio >= cc.default_overflow_ratio {
             CompactionStrategy::Default
         } else {
             CompactionStrategy::Conservative
@@ -993,7 +993,7 @@ impl AgentLoop {
         let chars_after = self.messages[start].char_len();
         let tokens_saved = chars_before
             .saturating_sub(chars_after)
-            .div_ceil(CHARS_PER_ESTIMATED_TOKEN) as u64;
+            .div_ceil(self.compaction_config.chars_per_token) as u64;
 
         info!(
             agent_id = %self.agent_id,
@@ -1174,16 +1174,16 @@ fn smart_truncate_tool_result(content: &str, limit: usize) -> String {
     )
 }
 
-fn truncate_tool_result(s: &str) -> String {
-    if s.len() <= MAX_TOOL_RESULT_CHARS {
+fn truncate_tool_result(s: &str, max_chars: usize) -> String {
+    if s.len() <= max_chars {
         return s.to_string();
     }
 
     if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(s) {
         if let Some(content) = val.get_mut("content") {
             if let Some(text) = content.as_str() {
-                if text.len() > MAX_TOOL_RESULT_CHARS - 200 {
-                    let limit = MAX_TOOL_RESULT_CHARS - 200;
+                if text.len() > max_chars - 200 {
+                    let limit = max_chars - 200;
                     let truncated = format!(
                         "{}...\n\n[truncated: showing {}/{} chars. Use offset parameter to read more.]",
                         safe_prefix(text, limit),
@@ -1192,7 +1192,7 @@ fn truncate_tool_result(s: &str) -> String {
                     );
                     *content = serde_json::Value::String(truncated);
                     return serde_json::to_string(&val)
-                        .unwrap_or_else(|_| safe_prefix(s, MAX_TOOL_RESULT_CHARS).to_string());
+                        .unwrap_or_else(|_| safe_prefix(s, max_chars).to_string());
                 }
             }
         }
@@ -1200,8 +1200,8 @@ fn truncate_tool_result(s: &str) -> String {
 
     format!(
         "{}...[truncated: {}/{} chars]",
-        safe_prefix(s, MAX_TOOL_RESULT_CHARS),
-        MAX_TOOL_RESULT_CHARS,
+        safe_prefix(s, max_chars),
+        max_chars,
         s.len()
     )
 }

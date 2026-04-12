@@ -191,10 +191,17 @@ pub fn truncate(s: &str, max_len: usize) -> String {
     }
 }
 
-/// Helper function to calculate the estimated token count for a message
+/// Helper function to calculate the estimated token count for a message.
+///
+/// Uses the default chars-per-token ratio from [`CompactionConfig`].
+/// For a configurable ratio, use [`estimate_token_count_with`].
 pub fn estimate_token_count(message: &ChatMessage) -> usize {
-    const CHARS_PER_TOKEN: usize = 4;
-    message.char_len() / CHARS_PER_TOKEN
+    estimate_token_count_with(message, sdk_core::config::CompactionConfig::default().chars_per_token)
+}
+
+/// Estimate the token count for a message using a custom chars-per-token ratio.
+pub fn estimate_token_count_with(message: &ChatMessage, chars_per_token: usize) -> usize {
+    message.char_len() / chars_per_token.max(1)
 }
 
 /// Helper function to calculate the estimated token count for a set of messages

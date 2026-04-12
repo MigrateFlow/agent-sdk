@@ -6,7 +6,9 @@ use serde_json::json;
 use sdk_core::error::{SdkError, SdkResult};
 use sdk_core::traits::tool::{Tool, ToolDefinition};
 
-const DEFAULT_MAX_LINES: usize = 2000;
+fn default_max_lines() -> usize {
+    sdk_core::config::ToolLimitsConfig::default().read_max_lines
+}
 
 /// Known binary / image extensions that should not be read as text.
 const IMAGE_EXTENSIONS: &[&str] = &[
@@ -111,7 +113,7 @@ impl Tool for ReadFileTool {
         let limit = arguments["limit"]
             .as_u64()
             .or_else(|| arguments["max_lines"].as_u64())
-            .unwrap_or(DEFAULT_MAX_LINES as u64) as usize;
+            .unwrap_or(default_max_lines() as u64) as usize;
 
         // Offset is now 1-based (0 also accepted for backward compat)
         let raw_offset = arguments["offset"].as_u64().unwrap_or(0) as usize;

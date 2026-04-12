@@ -16,10 +16,12 @@ use sdk_core::traits::llm_client::{LlmClient, StreamDelta};
 use sdk_core::traits::tool::Tool;
 use sdk_core::types::chat::ChatMessage;
 
+use crate::compaction::compact_conversation;
 use crate::display::{print_task_list, truncate};
 use crate::format::{
-    create_spinner, format_duration, format_result_preview, format_tool_label,
+    format_duration, format_result_preview, format_tool_label,
     lang_hint, print_team_plan, print_team_result_summary, truncate_tool_result,
+    CyclingSpinner,
 };
 use crate::ndjson::{emit_ndjson, NdjsonEvent};
 use crate::session::CliTask;
@@ -90,13 +92,38 @@ pub async fn run_turn(
             messages.push(ChatMessage::user(notification));
         }
 
+        // ── Auto-compaction: compact when context approaches the limit ──
+        {
+            let compaction_cfg = sdk_core::config::CompactionConfig::default();
+            let max_ctx = sdk_core::config::AgentConfig::default().max_context_tokens;
+            let estimated_tokens: usize = messages
+                .iter()
+                .map(|m| m.char_len() / compaction_cfg.chars_per_token.max(1))
+                .sum();
+            let threshold = (max_ctx as f64 * compaction_cfg.proactive_compaction_ratio) as usize;
+            if estimated_tokens > threshold {
+                let before = messages.len();
+                let (freed, strategy) = compact_conversation(messages);
+                if freed > 0 && !json_mode {
+                    let after = messages.len();
+                    eprintln!(
+                        "  {} {}→{} messages ({} freed, {})",
+                        style("↻").dim(),
+                        before, after,
+                        freed,
+                        style(strategy).dim(),
+                    );
+                }
+            }
+        }
+
         if interrupt.load(Ordering::Relaxed) {
             interrupt.store(false, Ordering::Relaxed);
             if !json_mode { eprintln!("\n  {}", style("Interrupted").yellow()); }
             return Ok(TurnStats { tokens: total_tokens, tool_calls: tool_calls_count, iterations: iteration + 1, duration: started.elapsed() });
         }
 
-        let mut spinner = if json_mode { None } else { Some(create_spinner("Thinking…")) };
+        let mut spinner = if json_mode { None } else { Some(CyclingSpinner::new()) };
         let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel::<StreamDelta>();
         let (streaming_started_tx, streaming_started_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -132,14 +159,16 @@ pub async fn run_turn(
         let result = tokio::select! {
             biased;
             _ = streaming_started_rx => {
-                if let Some(s) = spinner.take() { s.finish_and_clear(); }
+                if let Some(ref s) = spinner { s.finish_and_clear(); }
+                spinner = None;
                 llm_fut.await
             }
             res = &mut llm_fut => res,
         };
 
         let streamed = emit_handle.await.unwrap_or(false);
-        if let Some(s) = spinner { s.finish_and_clear(); }
+        if let Some(ref s) = spinner { s.finish_and_clear(); }
+        drop(spinner);
 
         if interrupt.load(Ordering::Relaxed) {
             interrupt.store(false, Ordering::Relaxed);
@@ -190,55 +219,65 @@ pub async fn run_turn(
                         });
                     } else {
                         let label = format_tool_label(&tc.function.name, &tc.function.arguments);
-                        let connector = if is_last_tc { "└" } else { "├" };
-                        eprintln!("  {} {}", style(connector).cyan(), label);
 
-                        if tc.function.name == "spawn_agent_team" {
-                            print_team_plan(&tc.function.arguments);
-                        }
-
-                        // write_file preview
+                        // write_file: full panel with line-numbered preview
                         if tc.function.name == "write_file" {
                             let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or_default();
                             if let Some(content) = args["content"].as_str() {
                                 let path = args["path"].as_str().unwrap_or("?");
                                 let lang = lang_hint(path);
                                 let lines: Vec<&str> = content.lines().collect();
-                                eprintln!("  {}  {}", style("│").dim(), style(format!("── {} ({} lines{}) ──", path, lines.len(), lang)).dim());
+                                let panel_title = format!("{} ({} lines{})", label, lines.len(), lang);
                                 let show = lines.len().min(8);
-                                for line in &lines[..show] {
-                                    eprintln!("  {}  {}", style("│").dim(), style(truncate(line, 100)).dim());
-                                }
+                                let mut panel_lines: Vec<String> = lines[..show]
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, l)| format!("{} {} {}", style(format!("{:>3}", i + 1)).dim(), style("│").dim(), style(truncate(l, 80)).dim()))
+                                    .collect();
                                 if lines.len() > show {
-                                    eprintln!("  {}  {}", style("│").dim(), style(format!("… +{} more lines", lines.len() - show)).dim());
+                                    panel_lines.push(format!("    {} {}", style("│").dim(), style(format!("… +{} more lines", lines.len() - show)).dim()));
                                 }
+                                crate::ui::Panel::new().title(panel_title).color(console::Color::Cyan).indent(2).render(&panel_lines);
+                            } else {
+                                eprintln!("  {} {}", style("├").cyan(), label);
                             }
-                        }
 
-                        // edit_file diff preview
-                        if tc.function.name == "edit_file" {
+                        // edit_file: panel with diff preview
+                        } else if tc.function.name == "edit_file" {
                             let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or_default();
                             let old = args["old_string"].as_str().unwrap_or("");
                             let new = args["new_string"].as_str().unwrap_or("");
                             if !old.is_empty() || !new.is_empty() {
-                                let path = args["path"].as_str().unwrap_or("?");
-                                eprintln!("  {}  {}", style("│").dim(), style(format!("@@ {} @@", path)).cyan().dim());
+                                let max_preview = 6;
                                 let old_lines: Vec<&str> = old.lines().collect();
                                 let new_lines: Vec<&str> = new.lines().collect();
-                                let max_preview = 6;
+                                let mut panel_lines = Vec::new();
                                 for line in &old_lines[..old_lines.len().min(max_preview)] {
-                                    eprintln!("  {}  {}", style("│").dim(), style(format!("- {}", truncate(line, 90))).red().dim());
+                                    panel_lines.push(style(format!("- {}", truncate(line, 80))).red().dim().to_string());
                                 }
                                 if old_lines.len() > max_preview {
-                                    eprintln!("  {}  {}", style("│").dim(), style(format!("  … +{} more", old_lines.len() - max_preview)).dim());
+                                    panel_lines.push(style(format!("  … +{} more", old_lines.len() - max_preview)).dim().to_string());
                                 }
                                 for line in &new_lines[..new_lines.len().min(max_preview)] {
-                                    eprintln!("  {}  {}", style("│").dim(), style(format!("+ {}", truncate(line, 90))).green().dim());
+                                    panel_lines.push(style(format!("+ {}", truncate(line, 80))).green().dim().to_string());
                                 }
                                 if new_lines.len() > max_preview {
-                                    eprintln!("  {}  {}", style("│").dim(), style(format!("  … +{} more", new_lines.len() - max_preview)).dim());
+                                    panel_lines.push(style(format!("  … +{} more", new_lines.len() - max_preview)).dim().to_string());
                                 }
+                                crate::ui::Panel::new().title(label).color(console::Color::Cyan).indent(2).render(&panel_lines);
+                            } else {
+                                eprintln!("  {} {}", style("├").cyan(), label);
                             }
+
+                        // spawn_agent_team: label + team plan below
+                        } else if tc.function.name == "spawn_agent_team" {
+                            eprintln!("  {} {}", style("├").cyan(), label);
+                            print_team_plan(&tc.function.arguments);
+
+                        // All other tools: compact inline display
+                        } else {
+                            let connector = if is_last_tc { "└" } else { "├" };
+                            eprintln!("  {} {}", style(connector).cyan(), label);
                         }
                     }
 
@@ -262,7 +301,13 @@ pub async fn run_turn(
                     } else {
                         let preview = format_result_preview(&tc.function.name, &result_content);
                         let timing = if tool_elapsed.as_secs_f64() > 1.0 { format!(" ({})", format_duration(tool_elapsed)) } else { String::new() };
-                        eprintln!("    {}{}", style(&preview).dim(), style(&timing).dim());
+
+                        // For write/edit tools that already rendered a panel, show result below
+                        if tc.function.name == "write_file" || tc.function.name == "edit_file" {
+                            eprintln!("    {}{}", style(&preview).dim(), style(&timing).dim());
+                        } else {
+                            eprintln!("    {}{}", style(&preview).dim(), style(&timing).dim());
+                        }
 
                         if tc.function.name == "spawn_agent_team" {
                             print_team_result_summary(&result_content);

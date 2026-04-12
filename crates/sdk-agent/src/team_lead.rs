@@ -259,16 +259,12 @@ impl TeamLead {
                 }
             }
 
-            // Spawn replacement teammates if needed (only for generic mode),
-            // and also spawn additional teammates for dynamically created tasks.
-            {
+            // Spawn replacement teammates only in generic mode (no named specs).
+            // When named specs are provided, the original teammates are sufficient --
+            // don't keep spawning generic teammate-N agents.
+            if self.teammate_specs.is_empty() {
                 let active = registry.active_count();
-                let max_agents = if self.teammate_specs.is_empty() {
-                    self.config.max_parallel_agents
-                } else {
-                    // Allow growth up to 2x for dynamically created tasks
-                    self.config.max_parallel_agents * 2
-                };
+                let max_agents = self.config.max_parallel_agents;
                 if active < max_agents && summary.pending > 0 {
                     let name = format!("teammate-{}", agents_spawned + 1);
                     match self.spawn_teammate(&name, String::new(), false, None, None, &mut worktree_handles).await {
@@ -288,10 +284,10 @@ impl TeamLead {
                             });
                             registry.register(handle);
                             agents_spawned += 1;
-                            info!("Spawned additional teammate for pending tasks");
+                            info!("Spawned replacement teammate for pending tasks");
                         }
                         Err(e) => {
-                            warn!(error = %e, "Failed to spawn additional teammate");
+                            warn!(error = %e, "Failed to spawn replacement teammate");
                         }
                     }
                 }
