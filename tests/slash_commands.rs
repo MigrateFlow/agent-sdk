@@ -131,7 +131,7 @@ async fn non_slash_input_returns_none() {
 }
 
 #[tokio::test]
-async fn help_lists_all_six_builtins() {
+async fn help_lists_all_builtin_commands() {
     let registry = SlashCommandRegistry::builtin();
 
     let mut harness = TestHarness::new();
@@ -148,7 +148,7 @@ async fn help_lists_all_six_builtins() {
         other => panic!("expected Output, got {:?}", other),
     };
 
-    for name in ["/help", "/clear", "/compact", "/tasks", "/cost", "/quit"] {
+    for name in ["/help", "/clear", "/compact", "/tasks", "/cost", "/status", "/quit"] {
         assert!(
             text.contains(name),
             "expected help text to contain {name}, got:\n{text}"

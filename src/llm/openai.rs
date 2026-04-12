@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 use crate::config::LlmConfig;
 use crate::error::{SdkError, SdkResult};
 use crate::types::chat::{ChatMessage, FunctionCall, ToolCall};
+use crate::types::usage::TokenUsage;
 use crate::traits::llm_client::{LlmClient, StreamDelta};
 use crate::traits::tool::ToolDefinition;
 
@@ -82,7 +83,6 @@ struct ChatCompletionResponse {
     #[allow(dead_code)]
     id: Option<String>,
     choices: Vec<Choice>,
-    #[allow(dead_code)]
     model: Option<String>,
     usage: Option<OaiUsage>,
 }
@@ -96,10 +96,11 @@ struct Choice {
 
 #[derive(Debug, Clone, Deserialize)]
 struct OaiUsage {
-    #[allow(dead_code)]
+    #[serde(default)]
     prompt_tokens: u64,
-    #[allow(dead_code)]
+    #[serde(default)]
     completion_tokens: u64,
+    #[serde(default)]
     total_tokens: u64,
 }
 
@@ -806,10 +807,35 @@ impl LlmClient for OpenAiClient {
         messages: &[ChatMessage],
         tools: &[ToolDefinition],
     ) -> SdkResult<(ChatMessage, u64)> {
+        let (msg, usage) = self.chat_with_usage(messages, tools).await?;
+        Ok((msg, usage.input_tokens + usage.output_tokens))
+    }
+
+    async fn chat_with_usage(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDefinition],
+    ) -> SdkResult<(ChatMessage, TokenUsage)> {
         let oai_messages = chat_messages_to_oai(messages);
         let oai_tools = tool_defs_to_oai(tools);
 
         let response = self.send_chat(oai_messages, oai_tools).await?;
+
+        let model = response.model.clone().unwrap_or_else(|| self.model.clone());
+        let usage = response
+            .usage
+            .as_ref()
+            .map(|u| TokenUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                model: model.clone(),
+            })
+            .unwrap_or_else(|| TokenUsage {
+                model: model.clone(),
+                ..Default::default()
+            });
 
         let msg = response
             .choices
@@ -818,9 +844,8 @@ impl LlmClient for OpenAiClient {
             .ok_or_else(|| SdkError::LlmResponseParse("No choices in response".to_string()))?
             .message;
 
-        let tokens = response.usage.map(|u| u.total_tokens).unwrap_or(0);
         let chat_msg = oai_message_to_chat(msg);
-        Ok((chat_msg, tokens))
+        Ok((chat_msg, usage))
     }
 
     async fn chat_stream(

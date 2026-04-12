@@ -2,6 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, info, warn};
@@ -12,6 +13,7 @@ use crate::traits::llm_client::LlmClient;
 use crate::tools::registry::ToolRegistry;
 
 use super::events::AgentEvent;
+use super::hooks::{HookEvent, HookRegistry, HookResult};
 
 /// A result delivered from a background agent (subagent or team) back to the
 /// parent agent's conversation.  The agent loop drains these before each LLM
@@ -154,6 +156,10 @@ pub struct AgentLoop {
     /// is spawned; cleared by that task when it terminates (successfully or
     /// not).
     compaction_in_flight: Arc<AtomicBool>,
+    /// Optional hook registry. When set, the loop evaluates hooks around LLM
+    /// requests and tool calls, and gives `PreToolCall` hooks the ability to
+    /// veto a tool invocation.
+    hooks: Option<Arc<HookRegistry>>,
 }
 
 impl AgentLoop {
@@ -180,6 +186,7 @@ impl AgentLoop {
             background_rx: None,
             background_tx: None,
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
+            hooks: None,
         }
     }
 
@@ -224,7 +231,15 @@ impl AgentLoop {
             background_rx: None,
             background_tx: None,
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
+            hooks: None,
         }
+    }
+
+    /// Attach a hook registry. Hooks fire for `PreLlmRequest`,
+    /// `PostLlmRequest`, `PreToolCall`, and `PostToolCall`.
+    pub fn with_hooks(mut self, hooks: Arc<HookRegistry>) -> Self {
+        self.hooks = Some(hooks);
+        self
     }
 
     pub fn set_event_sink(&mut self, tx: UnboundedSender<AgentEvent>) {
@@ -282,11 +297,30 @@ impl AgentLoop {
                 "Agent loop iteration"
             );
 
-            let (response, tokens) = self
+            // Pre-LLM hook
+            self.evaluate_hook(HookEvent::PreLlmRequest {
+                message_count: self.messages.len(),
+            });
+
+            let llm_started = Instant::now();
+            let (response, usage) = self
                 .llm_client
-                .chat(&self.messages, &tool_defs)
+                .chat_with_usage(&self.messages, &tool_defs)
                 .await?;
+            let llm_elapsed_ms = llm_started.elapsed().as_millis() as u64;
+            let tokens = usage.input_tokens + usage.output_tokens;
             self.total_tokens += tokens;
+
+            // Post-LLM hook — carries the full usage breakdown so hooks like
+            // CostTracker can record cache metrics.
+            self.evaluate_hook(HookEvent::PostLlmRequest {
+                tokens_in: usage.input_tokens,
+                tokens_out: usage.output_tokens,
+                cache_in: usage.cache_creation_input_tokens,
+                cache_read: usage.cache_read_input_tokens,
+                duration_ms: llm_elapsed_ms,
+                model: usage.model.clone(),
+            });
 
             match &response {
                 ChatMessage::Assistant {
@@ -317,44 +351,107 @@ impl AgentLoop {
                         });
                     }
 
-                    // Execute all tool calls in parallel
+                    // Evaluate PreToolCall hooks. A rejection synthesizes a
+                    // tool_result with the feedback instead of dispatching.
+                    //
+                    // Each element is either:
+                    //   - Ok((id, name, args)) — allowed, will be dispatched
+                    //   - Err((id, name, feedback)) — rejected, synthesize result
+                    enum ToolPlan {
+                        Run {
+                            id: String,
+                            name: String,
+                            args: serde_json::Value,
+                        },
+                        Reject {
+                            id: String,
+                            name: String,
+                            feedback: String,
+                        },
+                    }
+
+                    let mut plan: Vec<ToolPlan> = Vec::with_capacity(tool_calls.len());
+                    for tool_call in tool_calls {
+                        let name = tool_call.function.name.clone();
+                        let args: serde_json::Value =
+                            serde_json::from_str(&tool_call.function.arguments)
+                                .unwrap_or_default();
+                        let id = tool_call.id.clone();
+
+                        let decision = self.evaluate_hook(HookEvent::PreToolCall {
+                            name: name.clone(),
+                            args: args.clone(),
+                        });
+
+                        match decision {
+                            HookResult::Reject { feedback } => {
+                                plan.push(ToolPlan::Reject { id, name, feedback });
+                            }
+                            HookResult::Continue => {
+                                plan.push(ToolPlan::Run { id, name, args });
+                            }
+                        }
+                    }
+
+                    // Dispatch allowed tool calls in parallel; rejected ones
+                    // resolve immediately with synthesized feedback.
                     let tools_ref = &self.tools;
-                    let futures: Vec<_> = tool_calls
-                        .iter()
-                        .map(|tool_call| {
-                            let name = tool_call.function.name.clone();
-                            let args: serde_json::Value =
-                                serde_json::from_str(&tool_call.function.arguments)
-                                    .unwrap_or_default();
-                            let id = tool_call.id.clone();
-                            async move {
-                                let result = tools_ref.execute(&name, args).await;
-                                (id, name, result)
+                    let futures: Vec<_> = plan
+                        .into_iter()
+                        .map(|entry| async move {
+                            match entry {
+                                ToolPlan::Run { id, name, args } => {
+                                    let started = Instant::now();
+                                    let args_for_hook = args.clone();
+                                    let result = tools_ref.execute(&name, args).await;
+                                    let duration_ms = started.elapsed().as_millis() as u64;
+                                    (id, name, args_for_hook, Ok(result), duration_ms)
+                                }
+                                ToolPlan::Reject { id, name, feedback } => {
+                                    (id, name, serde_json::Value::Null, Err(feedback), 0)
+                                }
                             }
                         })
                         .collect();
 
                     let results = futures_util::future::join_all(futures).await;
 
-                    for (call_id, tool_name, result) in results {
-                        let (result_content, result_preview) = match &result {
-                            Ok(val) => {
-                                let preview = build_result_preview(val);
-                                let full = serde_json::to_string(val).unwrap_or_default();
+                    for (call_id, tool_name, args, outcome, duration_ms) in results {
+                        let (result_content, result_preview) = match outcome {
+                            Ok(Ok(val)) => {
+                                let preview = build_result_preview(&val);
+                                let full = serde_json::to_string(&val).unwrap_or_default();
                                 (truncate_tool_result(&full), preview)
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 let err = serde_json::json!({"error": e.to_string()}).to_string();
                                 (err.clone(), err)
+                            }
+                            Err(feedback) => {
+                                // Hook rejection: synthesize a tool_result
+                                // carrying the feedback so the model sees it.
+                                let payload =
+                                    serde_json::json!({"rejected_by_hook": true, "feedback": feedback})
+                                        .to_string();
+                                (payload.clone(), payload)
                             }
                         };
 
                         self.emit(AgentEvent::ToolResult {
                             agent_id: self.agent_id,
                             name: self.agent_name.clone(),
-                            tool_name,
-                            result_preview,
+                            tool_name: tool_name.clone(),
+                            result_preview: result_preview.clone(),
                             iteration,
+                        });
+
+                        // PostToolCall hook (including rejected calls so
+                        // observers see every decision).
+                        self.evaluate_hook(HookEvent::PostToolCall {
+                            name: tool_name,
+                            args,
+                            result_preview,
+                            duration_ms,
                         });
 
                         self.messages.push(ChatMessage::tool_result(
@@ -889,6 +986,38 @@ impl AgentLoop {
         if let Some(ref tx) = self.event_tx {
             let _ = tx.send(event);
         }
+    }
+
+    /// Evaluate all configured hooks for `event`. Returns the first `Reject`
+    /// encountered (or `Continue` when no registry is attached). Mirrors the
+    /// short-circuit semantics of `HookRegistry::evaluate`.
+    fn evaluate_hook(&self, event: HookEvent) -> HookResult {
+        match &self.hooks {
+            Some(registry) => {
+                let result = registry.evaluate(&event);
+                if let HookResult::Reject { feedback } = &result {
+                    let event_name = hook_event_name(&event);
+                    self.emit(AgentEvent::HookRejected {
+                        event_name: event_name.to_string(),
+                        feedback: feedback.clone(),
+                    });
+                }
+                result
+            }
+            None => HookResult::Continue,
+        }
+    }
+}
+
+fn hook_event_name(event: &HookEvent) -> &'static str {
+    match event {
+        HookEvent::TeammateIdle { .. } => "teammate_idle",
+        HookEvent::TaskCreated { .. } => "task_created",
+        HookEvent::TaskCompleted { .. } => "task_completed",
+        HookEvent::PreToolCall { .. } => "pre_tool_call",
+        HookEvent::PostToolCall { .. } => "post_tool_call",
+        HookEvent::PreLlmRequest { .. } => "pre_llm_request",
+        HookEvent::PostLlmRequest { .. } => "post_llm_request",
     }
 }
 
