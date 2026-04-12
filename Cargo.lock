@@ -1728,10 +1728,13 @@ dependencies = [
  "console",
  "dirs",
  "indicatif",
+ "libc",
  "sdk-core",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

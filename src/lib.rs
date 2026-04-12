@@ -102,3 +102,4 @@ pub use sdk_core::storage::AgentPaths;
 pub use sdk_protocols::mcp::{McpClient, McpConfig, McpServerSpec};
 pub use sdk_protocols::lsp::{ChildLspClient, LspClient, LspConfig, LspManager, ServerSpec};
 pub use sdk_cli::{CommandContext, CommandOutcome, SlashCommand, SlashCommandRegistry};
+pub use sdk_cli::{SessionManager, SessionMetadata, SessionStatus};
