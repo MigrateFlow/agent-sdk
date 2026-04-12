@@ -159,6 +159,7 @@ impl AgentTeam {
             name: name.into(),
             prompt: prompt.into(),
             require_plan_approval: false,
+            model: None,
         });
         self
     }
@@ -175,6 +176,34 @@ impl AgentTeam {
             name: name.into(),
             prompt: prompt.into(),
             require_plan_approval: true,
+            model: None,
+        });
+        self
+    }
+
+    /// Add a teammate with a specific LLM model override.
+    ///
+    /// This enables cost-efficient mixing where, for example, a fast/cheap
+    /// model handles exploration while a powerful model handles implementation.
+    ///
+    /// ```rust,no_run
+    /// # use sdk_agent::agent::team::AgentTeam;
+    /// # use sdk_agent::config::{LlmConfig, AgentConfig};
+    /// AgentTeam::new(LlmConfig::default(), AgentConfig::default())
+    ///     .add_teammate_with_model("explorer", "Explore the codebase", "gpt-4o-mini")
+    ///     .add_teammate_with_model("implementer", "Implement changes", "gpt-4o");
+    /// ```
+    pub fn add_teammate_with_model(
+        mut self,
+        name: impl Into<String>,
+        prompt: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        self.teammate_specs.push(TeammateSpec {
+            name: name.into(),
+            prompt: prompt.into(),
+            require_plan_approval: false,
+            model: Some(model.into()),
         });
         self
     }
@@ -256,6 +285,7 @@ impl AgentTeam {
             task_store,
             broker,
             llm_client: client,
+            llm_config: self.llm_config.clone(),
             prompt_builder: self.prompt_builder.clone(),
             config: self.agent_config.clone(),
             source_root: self.source_root.clone(),

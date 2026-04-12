@@ -11,7 +11,7 @@ use sdk_core::events::AgentEvent;
 use sdk_core::hooks::HookRegistry;
 use sdk_core::memory::MemoryStore;
 use crate::team_lead::{TeamLead, TeammateSpec};
-use sdk_core::config::AgentConfig;
+use sdk_core::config::{AgentConfig, LlmConfig};
 use sdk_core::error::{SdkError, SdkResult};
 use sdk_task::mailbox::broker::MessageBroker;
 use sdk_core::storage::AgentPaths;
@@ -27,6 +27,7 @@ pub struct SpawnAgentTeamTool {
     pub work_dir: PathBuf,
     pub source_root: PathBuf,
     pub llm_client: Arc<dyn LlmClient>,
+    pub llm_config: LlmConfig,
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
     /// When set, background team results are sent back through this channel
     /// so the parent agent loop can inject them into its conversation.
@@ -59,6 +60,8 @@ struct TeammateRequest {
     role: String,
     #[serde(default)]
     require_plan_approval: bool,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,7 +96,8 @@ impl Tool for SpawnAgentTeamTool {
                             "properties": {
                                 "name": { "type": "string", "description": "Short name for the teammate (e.g. 'backend-dev', 'reviewer')" },
                                 "role": { "type": "string", "description": "Description of what this teammate should do" },
-                                "require_plan_approval": { "type": "boolean", "description": "If true, teammate must submit a plan before implementing" }
+                                "require_plan_approval": { "type": "boolean", "description": "If true, teammate must submit a plan before implementing" },
+                                "model": { "type": "string", "description": "Optional LLM model override for this teammate (e.g. 'gpt-4o-mini'). When omitted, uses the team's default model." }
                             },
                             "required": ["name", "role"]
                         }
@@ -199,6 +203,7 @@ impl Tool for SpawnAgentTeamTool {
                 name: t.name.clone(),
                 prompt: t.role.clone(),
                 require_plan_approval: t.require_plan_approval,
+                model: t.model.clone(),
             })
             .collect();
 
@@ -226,6 +231,7 @@ impl Tool for SpawnAgentTeamTool {
             task_store,
             broker,
             llm_client: self.llm_client.clone(),
+            llm_config: self.llm_config.clone(),
             prompt_builder: Arc::new(DefaultPromptBuilder),
             config: AgentConfig {
                 max_parallel_agents: teammate_count,

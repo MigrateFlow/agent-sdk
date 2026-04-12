@@ -83,6 +83,7 @@ pub struct TeamToolConfig {
     pub work_dir: PathBuf,
     pub source_root: PathBuf,
     pub llm_client: Arc<dyn LlmClient>,
+    pub llm_config: sdk_core::config::LlmConfig,
     pub event_tx: Option<UnboundedSender<AgentEvent>>,
     pub background_tx: Option<UnboundedSender<BackgroundResult>>,
 }
@@ -200,6 +201,7 @@ impl DefaultToolsetBuilder {
             work_dir: config.work_dir,
             source_root: config.source_root,
             llm_client: config.llm_client,
+            llm_config: config.llm_config,
             event_tx: config.event_tx,
             background_tx: config.background_tx,
         });

@@ -31,6 +31,11 @@ pub struct TeammateSpec {
     pub name: String,
     pub prompt: String,
     pub require_plan_approval: bool,
+    /// Optional model override for this teammate.  When set, a dedicated
+    /// `LlmClient` is created using the team's `LlmConfig` with the model
+    /// field replaced.  When `None`, the teammate shares the team lead's
+    /// client.
+    pub model: Option<String>,
 }
 
 pub struct TeamLead {
@@ -40,6 +45,7 @@ pub struct TeamLead {
     pub task_store: Arc<TaskStore>,
     pub broker: Arc<MessageBroker>,
     pub llm_client: Arc<dyn LlmClient>,
+    pub llm_config: sdk_core::config::LlmConfig,
     pub prompt_builder: Arc<dyn PromptBuilder>,
     pub config: AgentConfig,
     pub source_root: std::path::PathBuf,
@@ -125,7 +131,7 @@ impl TeamLead {
             let initial_count = self.config.max_parallel_agents;
             for i in 0..initial_count {
                 let name = format!("teammate-{}", i + 1);
-                match self.spawn_teammate(&name, String::new(), false).await {
+                match self.spawn_teammate(&name, String::new(), false, None).await {
                     Ok(handle) => {
                         name_map.insert(handle.agent_id, handle.name.clone());
                         team_members.push(TeamConfigMember {
@@ -254,7 +260,7 @@ impl TeamLead {
                 && (summary.pending > 0)
             {
                 let name = format!("teammate-{}", agents_spawned + 1);
-                match self.spawn_teammate(&name, String::new(), false).await {
+                match self.spawn_teammate(&name, String::new(), false, None).await {
                     Ok(handle) => {
                         name_map.insert(handle.agent_id, handle.name.clone());
                         team_members.push(TeamConfigMember {
@@ -376,6 +382,7 @@ impl TeamLead {
         name: &str,
         role_prompt: String,
         require_plan_approval: bool,
+        model_override: Option<String>,
     ) -> SdkResult<AgentHandle> {
         let agent_id = Uuid::new_v4();
         self.broker.register_agent(agent_id)?;
@@ -388,13 +395,21 @@ impl TeamLead {
             format!("Team goal: {}\n\n{}", self.team_goal, role_prompt)
         };
 
+        let client: Arc<dyn LlmClient> = if let Some(ref model) = model_override {
+            let mut config = self.llm_config.clone();
+            config.model = model.clone();
+            sdk_llm::create_client(&config)?
+        } else {
+            self.llm_client.clone()
+        };
+
         let ctx = AgentContext {
             agent_id,
             name: name.to_string(),
             role_prompt: effective_role_prompt,
             task_store: self.task_store.clone(),
             broker: self.broker.clone(),
-            llm_client: self.llm_client.clone(),
+            llm_client: client,
             prompt_builder: self.prompt_builder.clone(),
             work_dir: self.work_dir.clone(),
             source_root: self.source_root.clone(),
@@ -426,6 +441,7 @@ impl TeamLead {
             &spec.name,
             spec.prompt.clone(),
             spec.require_plan_approval,
+            spec.model.clone(),
         )
             .await
     }
