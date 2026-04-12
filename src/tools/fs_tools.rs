@@ -69,10 +69,10 @@ impl Tool for ReadFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "read_file".to_string(),
-            description: "Read a file's contents. Returns lines with line numbers (cat -n \
-                          format). For large files, use offset/limit to read specific ranges. \
-                          Detects binary files, images, and PDFs — returns metadata instead \
-                          of raw bytes for those."
+            description: "Read a file from the local filesystem. By default reads up to \
+                          2000 lines from the beginning. Use offset/limit to read specific \
+                          ranges. Results use line number prefixes. Detects images, PDFs, \
+                          and binary files. Can only read files, not directories."
                 .to_string(),
             parameters: json!({
                 "type": "object",
@@ -223,16 +223,49 @@ impl Tool for ReadFileTool {
 
         let all_lines: Vec<&str> = content.lines().collect();
         let total_lines = all_lines.len();
-        let start = offset.min(total_lines);
+
+        // Handle empty file
+        if total_lines == 0 {
+            return Ok(json!({
+                "content": "<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>",
+                "lines": 0,
+                "path": path,
+            }));
+        }
+
+        // Handle offset past end of file
+        if offset >= total_lines {
+            return Ok(json!({
+                "content": format!(
+                    "<system-reminder>Warning: the file exists but is shorter than the provided \
+                     offset ({}). The file has {} lines.</system-reminder>",
+                    offset + 1,
+                    total_lines
+                ),
+                "lines": total_lines,
+                "path": path,
+            }));
+        }
+
+        let start = offset;
         let end = (start + limit).min(total_lines);
         let slice = &all_lines[start..end];
         let truncated = end < total_lines;
 
-        // Format with line numbers (cat -n style): "line_number\tcontent"
+        // Format with line numbers: right-padded to 6 chars + arrow separator
+        // Matches Claude Code format: "     1→content" (compact: "1\tcontent")
         let numbered_lines: Vec<String> = slice
             .iter()
             .enumerate()
-            .map(|(i, line)| format!("{}\t{}", start + i + 1, line))
+            .map(|(i, line)| {
+                let num = start + i + 1;
+                let num_str = num.to_string();
+                if num_str.len() >= 6 {
+                    format!("{}→{}", num_str, line)
+                } else {
+                    format!("{:>6}→{}", num, line)
+                }
+            })
             .collect();
         let result_content = numbered_lines.join("\n");
 
