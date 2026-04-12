@@ -10,6 +10,7 @@ pub mod teammate;
 pub mod builder;
 pub mod team_tools;
 pub mod subagent_tools;
+pub mod worktree;
 
 pub use agent_loop::AgentLoop;
 pub use subagent::{SubAgentDef, SubAgentRegistry, SubAgentResult, SubAgentRunner};
