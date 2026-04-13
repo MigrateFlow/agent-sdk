@@ -3,9 +3,20 @@
 
 use std::path::Path;
 
-use console::style;
+use console::{self, style};
 
 use crate::session::CliTask;
+
+/// Rotating palette used for agent name tags in both the event handler and
+/// the parallel-agent dashboard.
+pub const AGENT_COLORS: &[console::Color] = &[
+    console::Color::Magenta,
+    console::Color::Blue,
+    console::Color::Yellow,
+    console::Color::Green,
+    console::Color::Cyan,
+    console::Color::Red,
+];
 
 /// Shorten the home dir to `~` for display.
 pub fn display_path(path: &Path) -> String {
