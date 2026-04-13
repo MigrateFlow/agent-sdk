@@ -19,6 +19,79 @@ pub fn git_branch(work_dir: &Path) -> Option<String> {
     }
 }
 
+/// Detect primary project language from manifest files.
+fn detect_project_type(work_dir: &Path) -> Option<&'static str> {
+    let checks: &[(&str, &str)] = &[
+        ("Cargo.toml", "Rust"),
+        ("package.json", "JS/TS"),
+        ("pyproject.toml", "Python"),
+        ("go.mod", "Go"),
+        ("Gemfile", "Ruby"),
+        ("pom.xml", "Java"),
+        ("build.gradle", "Java"),
+    ];
+    for (file, lang) in checks {
+        if work_dir.join(file).exists() {
+            return Some(lang);
+        }
+    }
+    None
+}
+
+/// Count source files under `work_dir`, skipping common build/vendor dirs.
+/// Only counts files matching the detected project language (or all source
+/// files if no project type is detected). Returns None if no files found.
+fn count_source_files(work_dir: &Path) -> Option<(usize, &'static str)> {
+    use std::time::Instant;
+
+    let (match_exts, label): (&[&str], &str) = match detect_project_type(work_dir) {
+        Some("Rust") => (&["rs"], ".rs"),
+        Some("JS/TS") => (&["ts", "tsx", "js", "jsx"], ".ts/.js"),
+        Some("Python") => (&["py"], ".py"),
+        Some("Go") => (&["go"], ".go"),
+        Some("Java") => (&["java"], ".java"),
+        Some("Ruby") => (&["rb"], ".rb"),
+        _ => (&["rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "rb"], "source"),
+    };
+
+    let start = Instant::now();
+    let skip_dirs: &[&str] = &[".git", "target", "node_modules", "__pycache__", ".venv", "build", "dist", ".next"];
+    let mut count = 0usize;
+    let mut stack: Vec<(std::path::PathBuf, usize)> = vec![(work_dir.to_path_buf(), 0)];
+
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > 5 || start.elapsed().as_millis() > 100 {
+            break;
+        }
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let ft = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if ft.is_dir() {
+                if !skip_dirs.contains(&name_str.as_ref()) {
+                    stack.push((entry.path(), depth + 1));
+                }
+            } else if ft.is_file() {
+                let path = entry.path();
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    if match_exts.contains(&ext) {
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if count > 0 { Some((count, label)) } else { None }
+}
+
 pub fn print_welcome(
     model: &str,
     provider: &str,
@@ -26,38 +99,85 @@ pub fn print_welcome(
     tool_count: usize,
     mcp_count: usize,
     session_id: Option<&str>,
+    session_path: Option<&Path>,
 ) {
     let version = env!("CARGO_PKG_VERSION");
     let branch = git_branch(work_dir);
-    let dir = display_path(work_dir);
+    let project_name = work_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "project".to_string());
 
-    let cwd_line = if let Some(ref b) = branch {
-        format!("{} {}", dir, style(format!("({})", b)).cyan())
-    } else {
-        dir
-    };
+    // Line 1: title
+    let title_line = format!(
+        "{} {}",
+        style("✻").cyan().bold(),
+        style(format!("Agent SDK v{}", version)).bold(),
+    );
 
-    let mut header = vec![
-        format!("{} {}", style("✻").cyan().bold(), style(format!("Agent v{}", version)).bold()),
-        format!("{} {}", style("cwd:").dim(), cwd_line),
-        format!(
-            "{} {} ({}) · {} tools",
-            style("model:").dim(),
-            model,
-            style(provider).dim(),
-            style(tool_count).dim(),
-        ),
+    // Line 2: model
+    let model_line = format!(
+        "{} {}",
+        style("Model:").dim(),
+        model,
+    );
+
+    // Line 3: provider, tools, mcp
+    let mut provider_parts = vec![
+        format!("{}", style(provider).white()),
+        format!("{} {}", style("Tools:").dim(), tool_count),
     ];
     if mcp_count > 0 {
-        header.push(format!(
-            "{} {} server{}",
-            style("mcp:").dim(),
-            style(mcp_count).dim(),
-            if mcp_count == 1 { "" } else { "s" },
+        provider_parts.push(format!("{} {}", style("MCP:").dim(), mcp_count));
+    }
+    let provider_line = format!(
+        "{} {}",
+        style("Provider:").dim(),
+        provider_parts.join(&format!(" {} ", style("·").dim())),
+    );
+
+    // Line 4: project, branch, file count
+    let mut project_parts = vec![style(project_name).white().to_string()];
+    if let Some(ref b) = branch {
+        project_parts.push(format!("({})", style(b).green()));
+    }
+    if let Some((count, ext)) = count_source_files(work_dir) {
+        project_parts.push(format!(
+            "{} {} {} files",
+            style("·").dim(),
+            count,
+            ext,
         ));
     }
-    if let Some(id) = session_id {
-        header.push(format!("{} {}", style("session:").dim(), style(id).dim()));
+    let project_line = format!(
+        "{} {}",
+        style("Project:").dim(),
+        project_parts.join(" "),
+    );
+
+    // Line 5: session
+    let session_line = if let Some(id) = session_id {
+        let path_str = session_path
+            .map(|p| display_path(p))
+            .unwrap_or_default();
+        if path_str.is_empty() {
+            format!("{} {}", style("Session:").dim(), style(id).dim())
+        } else {
+            format!(
+                "{} {} {} {}",
+                style("Session:").dim(),
+                style(id).dim(),
+                style("·").dim(),
+                style(path_str).dim(),
+            )
+        }
+    } else {
+        String::new()
+    };
+
+    let mut header = vec![title_line, model_line, provider_line, project_line];
+    if !session_line.is_empty() {
+        header.push(session_line);
     }
 
     let footer = vec![

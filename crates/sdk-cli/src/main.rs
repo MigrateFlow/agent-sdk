@@ -231,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
     // ── Interactive REPL ──
     let tool_count = 18 + mcp_tools.len() + if memory_store.is_some() { 5 } else { 0 };
     let provider_name = match llm_config.provider { LlmProvider::Claude => "claude", LlmProvider::OpenAi => "openai" };
-    print_welcome(&model, provider_name, &work_dir, tool_count, mcp_tools.len(), None);
+    print_welcome(&model, provider_name, &work_dir, tool_count, mcp_tools.len(), None, Some(session_path.as_path()));
 
     let slash_registry = SlashCommandRegistry::builtin();
     let tasks = Arc::new(Mutex::new(Vec::<CliTask>::new()));
