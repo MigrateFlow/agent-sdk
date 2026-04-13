@@ -71,33 +71,18 @@ impl EventRenderer {
 
     fn handle(&mut self, event: AgentEvent) {
         match event {
-            // ── Team lifecycle: only show the header ──
-            AgentEvent::TeamSpawned { .. } => {
-                // Suppressed -- the Team Plan panel printed by turn.rs is enough
-            }
+            // ── Suppressed: per-tool-call events are shown via SubAgentProgress ──
+            AgentEvent::ToolCall { .. } => {}
+            AgentEvent::ToolResult { .. } => {}
+            AgentEvent::Thinking { .. } => {}
+            AgentEvent::TaskCreated { .. } => {}
 
-            // Suppressed: teammate spawn/idle/shutdown are pure noise
-            AgentEvent::TeammateSpawned { ref name, .. } => {
-                self.active_agents.insert(name.clone());
-                self.start_times.insert(name.clone(), Instant::now());
-                // silent -- shown in Team Plan panel
-            }
-            AgentEvent::TeammateIdle { ref name, .. } => {
-                self.active_agents.remove(name);
-                // silent
-            }
-            AgentEvent::AgentShutdown { ref name, .. } => {
-                self.active_agents.remove(name);
-                // silent
-            }
-
-            // ── Tasks: show start and completion only ──
+            // ── Tasks: show start and completion ──
             AgentEvent::TaskStarted { ref name, ref title, .. } => {
                 self.active_agents.insert(name.clone());
                 self.start_times.insert(name.clone(), Instant::now());
                 let c = self.agent_color(name);
                 let tag = self.name_tag(name);
-                // Clear any lingering progress line
                 eprint!("\r\x1b[K");
                 let _ = io::stderr().flush();
                 eprintln!("{} {} {}", tag, style("▸").fg(c), style(title).white());
@@ -125,13 +110,6 @@ impl EventRenderer {
                 let tag = self.name_tag(name);
                 eprintln!("{} {} {}", tag, style("✗").red(), style(truncate(error, 80)).red());
             }
-
-            // ── Suppressed: per-tool-call events are shown via SubAgentProgress ──
-            AgentEvent::ToolCall { .. } => {}
-            AgentEvent::ToolResult { .. } => {}
-            AgentEvent::Thinking { .. } => {}
-            AgentEvent::TaskCreated { .. } => {}
-            AgentEvent::TeammateMessage { .. } => {}
 
             // ── Plan events: keep (rare, meaningful) ──
             AgentEvent::PlanSubmitted { ref name, ref plan_preview, .. } => {
@@ -167,7 +145,7 @@ impl EventRenderer {
                     eprintln!(
                         "  {} {} {}{}",
                         style("⎿").cyan(),
-                        style("Subagent").bold(),
+                        style("Agent").bold(),
                         style(name).fg(c).bold(),
                         style(desc).dim(),
                     );
@@ -219,7 +197,6 @@ impl EventRenderer {
                         style(&elapsed).dim(),
                     );
                 }
-                // No final_content preview -- too spammy
             }
             AgentEvent::SubAgentFailed { ref name, ref error, .. } => {
                 self.active_agents.remove(name);
@@ -265,9 +242,6 @@ pub async fn run_event_handler(
         // JSON mode: emit structured NDJSON, skip stderr
         if json_mode {
             match &event {
-                AgentEvent::TeamSpawned { teammate_count } => {
-                    emit_ndjson(&NdjsonEvent::TeamSpawned { teammate_count: *teammate_count });
-                }
                 AgentEvent::SubAgentSpawned { name, description, .. } => {
                     emit_ndjson(&NdjsonEvent::SubagentSpawned { name: name.clone(), description: description.clone() });
                 }

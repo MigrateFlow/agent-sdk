@@ -5,17 +5,6 @@ use crate::error::{AgentId, TaskId};
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
-    // --- Team lifecycle ---
-    TeamSpawned {
-        teammate_count: usize,
-    },
-    TeammateSpawned {
-        agent_id: AgentId,
-        name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        worktree_path: Option<String>,
-    },
-
     // --- Task lifecycle ---
     TaskCreated {
         agent_id: AgentId,
@@ -81,38 +70,6 @@ pub enum AgentEvent {
         name: String,
         task_id: TaskId,
         feedback: String,
-    },
-
-    // --- Communication ---
-    TeammateMessage {
-        from: AgentId,
-        from_name: String,
-        to: AgentId,
-        content_preview: String,
-    },
-    TeammateIdle {
-        agent_id: AgentId,
-        name: String,
-        tasks_completed: usize,
-    },
-
-    // --- Shutdown ---
-    ShutdownRequested {
-        agent_id: AgentId,
-        name: String,
-    },
-    ShutdownAccepted {
-        agent_id: AgentId,
-        name: String,
-    },
-    ShutdownRejected {
-        agent_id: AgentId,
-        name: String,
-        reason: String,
-    },
-    AgentShutdown {
-        agent_id: AgentId,
-        name: String,
     },
 
     // --- Hooks ---
@@ -193,31 +150,22 @@ impl AgentEvent {
             | Self::TaskFailed { agent_id, .. }
             | Self::PlanSubmitted { agent_id, .. }
             | Self::PlanApproved { agent_id, .. }
-            | Self::PlanRejected { agent_id, .. }
-            | Self::TeammateIdle { agent_id, .. }
-            | Self::ShutdownRequested { agent_id, .. }
-            | Self::ShutdownAccepted { agent_id, .. }
-            | Self::ShutdownRejected { agent_id, .. }
-            | Self::TeammateSpawned { agent_id, .. }
-            | Self::AgentShutdown { agent_id, .. } => Some(*agent_id),
-            Self::TeammateMessage { from, .. } => Some(*from),
+            | Self::PlanRejected { agent_id, .. } => Some(*agent_id),
             Self::SubAgentSpawned { agent_id, .. }
             | Self::SubAgentProgress { agent_id, .. }
             | Self::SubAgentCompleted { agent_id, .. }
             | Self::SubAgentFailed { agent_id, .. }
             | Self::SubAgentUpdate { agent_id, .. } => Some(*agent_id),
-            Self::TeamSpawned { .. }
-            | Self::HookRejected { .. }
+            Self::HookRejected { .. }
             | Self::MemoryCompacted { .. }
             | Self::Custom { .. } => None,
         }
     }
 
-    /// Get the human-readable teammate name, if present.
+    /// Get the human-readable agent name, if present.
     pub fn agent_name(&self) -> Option<&str> {
         match self {
-            Self::TeammateSpawned { name, .. }
-            | Self::TaskCreated { name, .. }
+            Self::TaskCreated { name, .. }
             | Self::TaskStarted { name, .. }
             | Self::Thinking { name, .. }
             | Self::ToolCall { name, .. }
@@ -226,20 +174,13 @@ impl AgentEvent {
             | Self::TaskFailed { name, .. }
             | Self::PlanSubmitted { name, .. }
             | Self::PlanApproved { name, .. }
-            | Self::PlanRejected { name, .. }
-            | Self::TeammateIdle { name, .. }
-            | Self::ShutdownRequested { name, .. }
-            | Self::ShutdownAccepted { name, .. }
-            | Self::ShutdownRejected { name, .. }
-            | Self::AgentShutdown { name, .. } => Some(name),
-            Self::TeammateMessage { from_name, .. } => Some(from_name),
+            | Self::PlanRejected { name, .. } => Some(name),
             Self::SubAgentSpawned { name, .. }
             | Self::SubAgentProgress { name, .. }
             | Self::SubAgentCompleted { name, .. }
             | Self::SubAgentFailed { name, .. }
             | Self::SubAgentUpdate { name, .. } => Some(name),
-            Self::TeamSpawned { .. }
-            | Self::HookRejected { .. }
+            Self::HookRejected { .. }
             | Self::MemoryCompacted { .. }
             | Self::Custom { .. } => None,
         }
@@ -260,11 +201,6 @@ mod tests {
         let id = agent();
         let tid = Uuid::new_v4();
         let cases: Vec<AgentEvent> = vec![
-            AgentEvent::TeammateSpawned {
-                agent_id: id,
-                name: "n".into(),
-                worktree_path: None,
-            },
             AgentEvent::TaskCreated {
                 agent_id: id,
                 name: "n".into(),
@@ -328,28 +264,6 @@ mod tests {
                 task_id: tid,
                 feedback: "f".into(),
             },
-            AgentEvent::TeammateIdle {
-                agent_id: id,
-                name: "n".into(),
-                tasks_completed: 0,
-            },
-            AgentEvent::ShutdownRequested {
-                agent_id: id,
-                name: "n".into(),
-            },
-            AgentEvent::ShutdownAccepted {
-                agent_id: id,
-                name: "n".into(),
-            },
-            AgentEvent::ShutdownRejected {
-                agent_id: id,
-                name: "n".into(),
-                reason: "busy".into(),
-            },
-            AgentEvent::AgentShutdown {
-                agent_id: id,
-                name: "n".into(),
-            },
             AgentEvent::SubAgentSpawned {
                 agent_id: id,
                 name: "n".into(),
@@ -393,23 +307,8 @@ mod tests {
     }
 
     #[test]
-    fn teammate_message_uses_from_and_from_name() {
-        let from = agent();
-        let to = agent();
-        let e = AgentEvent::TeammateMessage {
-            from,
-            from_name: "sender".into(),
-            to,
-            content_preview: "hi".into(),
-        };
-        assert_eq!(e.agent_id(), Some(from));
-        assert_eq!(e.agent_name(), Some("sender"));
-    }
-
-    #[test]
     fn variants_without_agent_return_none() {
         let events = [
-            AgentEvent::TeamSpawned { teammate_count: 3 },
             AgentEvent::HookRejected {
                 event_name: "pre".into(),
                 feedback: "no".into(),
@@ -433,28 +332,12 @@ mod tests {
 
     #[test]
     fn serialization_uses_snake_case_tagged_type() {
-        let e = AgentEvent::TeamSpawned { teammate_count: 2 };
-        let json = serde_json::to_value(&e).unwrap();
-        assert_eq!(json["type"], "team_spawned");
-        assert_eq!(json["teammate_count"], 2);
-    }
-
-    #[test]
-    fn serialization_omits_none_worktree_path() {
-        let e = AgentEvent::TeammateSpawned {
+        let e = AgentEvent::SubAgentSpawned {
             agent_id: agent(),
             name: "n".into(),
-            worktree_path: None,
+            description: "d".into(),
         };
         let json = serde_json::to_value(&e).unwrap();
-        assert!(json.get("worktree_path").is_none());
-
-        let e2 = AgentEvent::TeammateSpawned {
-            agent_id: agent(),
-            name: "n".into(),
-            worktree_path: Some("/tmp/wt".into()),
-        };
-        let json2 = serde_json::to_value(&e2).unwrap();
-        assert_eq!(json2["worktree_path"], "/tmp/wt");
+        assert_eq!(json["type"], "sub_agent_spawned");
     }
 }

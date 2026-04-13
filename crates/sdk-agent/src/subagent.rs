@@ -1,9 +1,8 @@
 //! Subagent — a lightweight, isolated agent that runs a focused task and returns
 //! results to the caller.
 //!
-//! Unlike agent teams where teammates communicate with each other via mailboxes,
-//! subagents only report results back to the parent agent. They run in their own
-//! context window with a custom system prompt and optional tool restrictions.
+//! Subagents run in their own context window with a custom system prompt and
+//! optional tool restrictions, and report results back to the parent agent.
 //!
 //! Subagents **cannot** spawn other subagents (no nesting).
 

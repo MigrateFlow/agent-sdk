@@ -314,16 +314,13 @@ pub fn format_tool_label(tool_name: &str, arguments: &str) -> String {
             let short = if cmd.len() > 80 { &cmd[..floor_char_boundary(cmd, 80)] } else { cmd };
             format!("{}", style(format!("$ {}", short)).white())
         }
-        "spawn_agent_team" => {
-            format!("{}", style("Spawn Agent Team").bold().magenta())
-        }
-        "spawn_subagent" => {
-            let name = arg_str(&args, "name").unwrap_or("subagent");
+        "agent" => {
+            let preset = arg_str(&args, "preset").unwrap_or("agent");
             let bg = args.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
             if bg {
-                format!("{} {} {}", style("Spawn Subagent").bold(), style(name).cyan().bold(), style("(background)").dim())
+                format!("{} {} {}", style("Agent").bold(), style(preset).cyan().bold(), style("(background)").dim())
             } else {
-                format!("{} {}", style("Spawn Subagent").bold(), style(name).cyan().bold())
+                format!("{} {}", style("Agent").bold(), style(preset).cyan().bold())
             }
         }
         "edit_file" => {
@@ -424,15 +421,9 @@ pub fn format_result_preview(tool_name: &str, result: &str) -> String {
                 format!("{} exit {} — {}", style("✗").red(), code, truncate(first_line, 60))
             }
         }
-        "spawn_agent_team" => {
+        "agent" => {
             let status = val["status"].as_str().unwrap_or("?");
-            let completed = val["tasks_completed"].as_u64().unwrap_or(0);
-            let total = val["total_tasks"].as_u64().unwrap_or(0);
-            format!("{} ({}/{} tasks)", status, completed, total)
-        }
-        "spawn_subagent" => {
-            let status = val["status"].as_str().unwrap_or("?");
-            let name = val["name"].as_str().unwrap_or("subagent");
+            let name = val["name"].as_str().unwrap_or("agent");
             let tokens = val["total_tokens"].as_u64().unwrap_or(0);
             let tool_calls = val["tool_calls"].as_u64().unwrap_or(0);
             if status == "background" {
@@ -480,73 +471,6 @@ pub fn format_result_preview(tool_name: &str, result: &str) -> String {
         }
         _ => truncate(result, 80),
     }
-}
-
-pub fn print_team_plan(arguments: &str) {
-    let args: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
-    let teammates = args["teammates"].as_array().cloned().unwrap_or_default();
-    let tasks = args["tasks"].as_array().cloned().unwrap_or_default();
-    let auto_assign = args["auto_assign"].as_bool().unwrap_or(true);
-
-    let mut lines = Vec::new();
-
-    if !teammates.is_empty() {
-        lines.push(format!("{} {}", style("Teammates").dim(), style(format!("({})", teammates.len())).dim()));
-        for teammate in &teammates {
-            let name = teammate["name"].as_str().unwrap_or("unnamed");
-            let role = teammate["role"].as_str().unwrap_or("");
-            let needs_plan = teammate["require_plan_approval"].as_bool().unwrap_or(false);
-            let suffix = if needs_plan { format!(" {}", style("[plan approval]").yellow()) } else { String::new() };
-            lines.push(format!("  {} {} {}{}", style("●").magenta(), style(name).magenta().bold(), style(truncate(role, 50)).dim(), suffix));
-        }
-    }
-
-    if !tasks.is_empty() {
-        if !teammates.is_empty() { lines.push(String::new()); }
-        let assign_label = if auto_assign { "auto-assign" } else { "claim freely" };
-        lines.push(format!("{} ({})", style("Tasks").dim(), style(assign_label).dim()));
-        for (idx, task) in tasks.iter().enumerate() {
-            let title = task["title"].as_str().unwrap_or("untitled");
-            let depends_on = task["depends_on"].as_array().cloned().unwrap_or_default();
-            let dep_str = if depends_on.is_empty() {
-                String::new()
-            } else {
-                let deps = depends_on.iter().filter_map(|v| v.as_u64()).map(|v| (v + 1).to_string()).collect::<Vec<_>>().join(", ");
-                format!(" {}", style(format!("[deps: {}]", deps)).dim())
-            };
-            lines.push(format!("  {} {}{}", style(format!("{}.", idx + 1)).magenta(), style(title).white(), dep_str));
-        }
-    }
-
-    if !lines.is_empty() {
-        crate::ui::Panel::new()
-            .title(style("Team Plan").bold().to_string())
-            .color(console::Color::Magenta)
-            .indent(4)
-            .render(&lines);
-    }
-}
-
-pub fn print_team_result_summary(result: &str) {
-    let val: serde_json::Value = serde_json::from_str(result).unwrap_or_default();
-    let assignments = val["task_assignments"].as_array().cloned().unwrap_or_default();
-    if assignments.is_empty() { return; }
-
-    let lines: Vec<String> = assignments
-        .iter()
-        .map(|assignment| {
-            let title = assignment["title"].as_str().unwrap_or("untitled");
-            let target = assignment["target_file"].as_str().unwrap_or("?");
-            let assignee = assignment["assigned_teammate"].as_str().unwrap_or("unassigned");
-            format!("{} {} {}", style(title).white(), style(format!("→ {}", target)).dim(), style(format!("[{}]", assignee)).cyan())
-        })
-        .collect();
-
-    crate::ui::Panel::new()
-        .title(style("Assignments").bold().to_string())
-        .color(console::Color::Magenta)
-        .indent(4)
-        .render(&lines);
 }
 
 pub fn arg_str<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {

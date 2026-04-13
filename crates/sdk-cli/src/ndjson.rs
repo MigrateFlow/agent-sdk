@@ -11,8 +11,7 @@ pub enum NdjsonEvent {
     TextDelta { content: String },
     Completed { final_content: String, tokens_used: u64, iterations: usize, tool_calls: usize },
     Failed { error: String },
-    // Team/subagent events for programmatic consumers
-    TeamSpawned { teammate_count: usize },
+    // Subagent events for programmatic consumers
     SubagentSpawned { name: String, description: String },
     SubagentProgress { name: String, iteration: usize, max_turns: usize, current_tool: Option<String>, tokens_so_far: u64 },
     SubagentCompleted { name: String, tokens_used: u64, iterations: usize, tool_calls: usize },

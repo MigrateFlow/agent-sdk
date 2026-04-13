@@ -9,12 +9,10 @@ use sdk_core::events::AgentEvent;
 use sdk_core::memory::MemoryStore;
 use crate::subagent::SubAgentRegistry;
 use sdk_core::error::AgentId;
-use sdk_task::task::store::TaskStore;
 use sdk_core::traits::llm_client::LlmClient;
 use sdk_core::traits::tool::Tool;
 
 use sdk_tools::command_tools::RunCommandTool;
-use sdk_tools::context_tools::{GetTaskContextTool, ListCompletedTasksTool};
 use sdk_tools::edit_tools::EditFileTool;
 use sdk_tools::fs_tools::{ListDirectoryTool, ReadFileTool, WriteFileTool};
 use sdk_tools::glob_tools::GlobTool;
@@ -27,9 +25,7 @@ use sdk_tools::memory_tools::{
 };
 use sdk_core::registry::ToolRegistry;
 use sdk_tools::search_tools::SearchFilesTool;
-use crate::subagent_tools::SpawnSubAgentTool;
-use crate::team_tools::SpawnAgentTeamTool;
-use sdk_tools::task_tools::CreateTaskTool;
+use crate::agent_tool::AgentTool;
 use sdk_tools::todo_tools::TodoWriteTool;
 use sdk_tools::web_tools::WebSearchTool;
 use sdk_protocols::lsp::{work_dir_to_root_uri, LspConfig, LspManager};
@@ -80,17 +76,7 @@ impl ToolFilter {
 }
 
 #[derive(Clone)]
-pub struct TeamToolConfig {
-    pub work_dir: PathBuf,
-    pub source_root: PathBuf,
-    pub llm_client: Arc<dyn LlmClient>,
-    pub llm_config: sdk_core::config::LlmConfig,
-    pub event_tx: Option<UnboundedSender<AgentEvent>>,
-    pub background_tx: Option<UnboundedSender<BackgroundResult>>,
-}
-
-#[derive(Clone)]
-pub struct SubAgentToolConfig {
+pub struct AgentToolConfig {
     pub work_dir: PathBuf,
     pub source_root: PathBuf,
     pub llm_client: Arc<dyn LlmClient>,
@@ -185,33 +171,8 @@ impl DefaultToolsetBuilder {
         self
     }
 
-    pub fn add_task_context_tools(mut self, task_store: Arc<TaskStore>) -> Self {
-        self.register(GetTaskContextTool {
-            task_store: task_store.clone(),
-        });
-        self.register(ListCompletedTasksTool { task_store });
-        self
-    }
-
-    pub fn add_task_creation_tools(mut self, task_store: Arc<TaskStore>, agent_id: AgentId) -> Self {
-        self.register(CreateTaskTool { task_store, agent_id });
-        self
-    }
-
-    pub fn add_team_tool(mut self, config: TeamToolConfig) -> Self {
-        self.register(SpawnAgentTeamTool {
-            work_dir: config.work_dir,
-            source_root: config.source_root,
-            llm_client: config.llm_client,
-            llm_config: config.llm_config,
-            event_tx: config.event_tx,
-            background_tx: config.background_tx,
-        });
-        self
-    }
-
-    pub fn add_subagent_tool(mut self, config: SubAgentToolConfig) -> Self {
-        self.register(SpawnSubAgentTool {
+    pub fn add_agent_tool(mut self, config: AgentToolConfig) -> Self {
+        self.register(AgentTool {
             work_dir: config.work_dir,
             source_root: config.source_root,
             llm_client: config.llm_client,
