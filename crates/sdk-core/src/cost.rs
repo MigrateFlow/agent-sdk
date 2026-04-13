@@ -29,18 +29,33 @@ pub struct ModelPrice {
 /// include a date suffix, e.g. `claude-sonnet-4-5-20250929`) still matches.
 pub static MODEL_PRICES: &[ModelPrice] = &[
     ModelPrice {
-        model: "claude-opus-4-6",
+        model: "claude-opus-4",
         input_per_1k: 15.0,
         output_per_1k: 75.0,
         cache_write_per_1k: 18.75,
-        cache_read_per_1k: 1.50,
+        cache_read_per_1k: 1.875,
     },
     ModelPrice {
-        model: "claude-sonnet-4-5",
+        model: "claude-sonnet-4",
         input_per_1k: 3.0,
         output_per_1k: 15.0,
         cache_write_per_1k: 3.75,
         cache_read_per_1k: 0.30,
+    },
+    ModelPrice {
+        model: "claude-haiku-4",
+        input_per_1k: 0.80,
+        output_per_1k: 4.0,
+        cache_write_per_1k: 1.0,
+        cache_read_per_1k: 0.08,
+    },
+    // gpt-4o-mini must appear before gpt-4o so the more-specific prefix matches first.
+    ModelPrice {
+        model: "gpt-4o-mini",
+        input_per_1k: 0.15,
+        output_per_1k: 0.60,
+        cache_write_per_1k: 0.0,
+        cache_read_per_1k: 0.0,
     },
     ModelPrice {
         model: "gpt-4o",
@@ -189,6 +204,20 @@ mod tests {
     }
 
     #[test]
+    fn price_lookup_matches_haiku() {
+        let p = price_for("claude-haiku-4-0-20260101").expect("haiku prefix match");
+        assert!((p.input_per_1k - 0.80).abs() < 1e-9);
+    }
+
+    #[test]
+    fn price_lookup_matches_gpt4o_mini_before_gpt4o() {
+        let p = price_for("gpt-4o-mini-2025").expect("gpt-4o-mini prefix match");
+        assert!((p.input_per_1k - 0.15).abs() < 1e-9);
+        let p2 = price_for("gpt-4o-2025").expect("gpt-4o prefix match");
+        assert!((p2.input_per_1k - 2.50).abs() < 1e-9);
+    }
+
+    #[test]
     fn estimate_opus_with_cache() {
         // 1K input + 1K output on opus = $15 + $75 = $90; no cache.
         let usd = estimate_usd("claude-opus-4-6", 1000, 1000, 0, 0);
@@ -197,9 +226,9 @@ mod tests {
 
     #[test]
     fn estimate_usd_includes_cache_terms() {
-        // Opus: cache_write $18.75/1K, cache_read $1.50/1K
+        // Opus: cache_write $18.75/1K, cache_read $1.875/1K
         let usd = estimate_usd("claude-opus-4-6", 0, 0, 2_000, 10_000);
-        let expected = 2.0 * 18.75 + 10.0 * 1.50;
+        let expected = 2.0 * 18.75 + 10.0 * 1.875;
         assert!((usd - expected).abs() < 1e-9);
     }
 
