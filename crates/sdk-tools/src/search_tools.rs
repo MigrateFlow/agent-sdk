@@ -12,6 +12,8 @@ pub struct SearchFilesTool {
 
 #[async_trait]
 impl Tool for SearchFilesTool {
+    fn is_read_only(&self) -> bool { true }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "search_files".to_string(),

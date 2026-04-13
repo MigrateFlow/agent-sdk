@@ -68,6 +68,8 @@ pub struct ReadFileTool {
 
 #[async_trait]
 impl Tool for ReadFileTool {
+    fn is_read_only(&self) -> bool { true }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "read_file".to_string(),
@@ -365,6 +367,8 @@ pub struct ListDirectoryTool {
 
 #[async_trait]
 impl Tool for ListDirectoryTool {
+    fn is_read_only(&self) -> bool { true }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "list_directory".to_string(),

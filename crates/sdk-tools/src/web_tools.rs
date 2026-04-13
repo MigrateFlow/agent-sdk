@@ -10,6 +10,8 @@ pub struct WebSearchTool;
 
 #[async_trait]
 impl Tool for WebSearchTool {
+    fn is_read_only(&self) -> bool { true }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "web_search".to_string(),

@@ -18,6 +18,7 @@ use sdk_core::types::chat::ChatMessage;
 use sdk_core::types::ultra_plan::{UltraPlanState, allowed_tools_for_phase, phase_system_suffix};
 
 use sdk_cli::cache_commands::CacheState;
+use sdk_cli::permission::PermissionState;
 use sdk_cli::commands::{CommandContext, CommandOutcome, SlashCommandRegistry};
 use sdk_cli::compaction::compact_conversation;
 use sdk_cli::mode_tools::ModeState;
@@ -205,6 +206,8 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    let mut permission_state = PermissionState::new(cli.allow_all_commands);
+
     if let Some(prompt) = one_shot_prompt {
         let mut messages = vec![ChatMessage::system(&system_prompt)];
         let tasks = Arc::new(Mutex::new(Vec::<CliTask>::new()));
@@ -216,6 +219,7 @@ async fn main() -> anyhow::Result<()> {
             cli.max_iterations, cli.allow_all_commands, Some(event_tx), tasks,
             interrupt, subagent_registry, cli.json, tool_filter, &mcp_tools,
             &paths, memory_store, cli_agent_id, Some(one_shot_mode),
+            &mut permission_state,
         ).await;
 
         match result {
@@ -421,6 +425,7 @@ async fn main() -> anyhow::Result<()> {
             interrupt.clone(), subagent_registry.clone(), false, plan_filter.as_deref(),
             &mcp_tools, &paths, memory_store.clone(), cli_agent_id,
             Some(mode_state.clone()),
+            &mut permission_state,
         ).await?;
 
         // Sync shared state → local mode (so tool-initiated mode changes take effect)

@@ -18,6 +18,7 @@ use sdk_core::types::chat::ChatMessage;
 
 use crate::compaction::compact_conversation;
 use crate::display::{print_task_list, truncate};
+use crate::permission::PermissionState;
 use crate::format::{
     format_duration, format_result_preview, format_tool_label,
     lang_hint, print_team_plan, print_team_result_summary, truncate_tool_result,
@@ -58,6 +59,7 @@ pub async fn run_turn(
     memory_store: Option<Arc<MemoryStore>>,
     cli_agent_id: AgentId,
     mode_state: Option<ModeState>,
+    permission_state: &mut PermissionState,
 ) -> anyhow::Result<TurnStats> {
     let (background_tx, mut background_rx) =
         tokio::sync::mpsc::unbounded_channel::<BackgroundResult>();
@@ -351,8 +353,26 @@ pub async fn run_turn(
                     }
 
                     let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+
+                    // Permission check: prompt the user for write/destructive tools.
+                    let (tool_is_read_only, tool_is_destructive) = match tools.get(&tc.function.name) {
+                        Some(t) => (t.is_read_only(), t.is_destructive()),
+                        None => (false, false),
+                    };
+                    let args_preview = extract_args_preview(&tc.function.name, &args);
+                    let permitted = json_mode || permission_state.check_permission(
+                        &tc.function.name,
+                        &args_preview,
+                        tool_is_read_only,
+                        tool_is_destructive,
+                    );
+
                     let tool_start = Instant::now();
-                    let result = tools.execute(&tc.function.name, args).await;
+                    let result = if permitted {
+                        tools.execute(&tc.function.name, args).await
+                    } else {
+                        Ok(serde_json::json!({"error": "Permission denied by user"}))
+                    };
                     let tool_elapsed = tool_start.elapsed();
 
                     let result_content = match &result {
@@ -428,4 +448,23 @@ pub async fn run_turn(
         eprintln!(); eprintln!("  {} Max iterations ({}) reached", style("⚠").yellow(), max_iterations);
     }
     Ok(TurnStats { tokens: total_tokens, tool_calls: tool_calls_count, iterations: max_iterations, duration: started.elapsed() })
+}
+
+/// Extract a short human-readable preview from tool arguments for the permission prompt.
+fn extract_args_preview(tool_name: &str, args: &serde_json::Value) -> String {
+    match tool_name {
+        "write_file" | "edit_file" => {
+            if let Some(path) = args["path"].as_str() {
+                return format!("to {}", path);
+            }
+        }
+        "run_command" => {
+            if let Some(cmd) = args["command"].as_str() {
+                let truncated = if cmd.len() > 60 { format!("{}...", &cmd[..57]) } else { cmd.to_string() };
+                return format!("`{}`", truncated);
+            }
+        }
+        _ => {}
+    }
+    String::new()
 }

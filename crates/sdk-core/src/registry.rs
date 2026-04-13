@@ -47,6 +47,11 @@ impl ToolRegistry {
         self.tools.keys().map(|s| s.as_str()).collect()
     }
 
+    /// Look up a tool by name, returning a reference to the trait object.
+    pub fn get(&self, name: &str) -> Option<&dyn Tool> {
+        self.tools.get(name).map(|t| t.as_ref())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }

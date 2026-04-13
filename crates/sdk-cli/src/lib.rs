@@ -9,6 +9,7 @@ pub mod format;
 pub mod mcp;
 pub mod mode_tools;
 pub mod ndjson;
+pub mod permission;
 pub mod plan_commands;
 pub mod session;
 pub mod session_commands;
