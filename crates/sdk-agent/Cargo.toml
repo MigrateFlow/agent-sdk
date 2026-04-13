@@ -2,7 +2,7 @@
 name = "sdk-agent"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.78"
+rust-version = "1.75"
 license = "MIT"
 description = "Agent orchestration and loop for agent-orchestrator-sdk"
 
