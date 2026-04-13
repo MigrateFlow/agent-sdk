@@ -54,7 +54,7 @@ struct Cli {
     max_tokens: usize,
 
     /// Max ReAct loop iterations per turn
-    #[arg(long, default_value = "50")]
+    #[arg(long, default_value = "100")]
     max_iterations: usize,
 
     /// System prompt override
