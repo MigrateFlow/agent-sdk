@@ -284,7 +284,7 @@ pub async fn run_turn(
                     } else {
                         let label = format_tool_label(&tc.function.name, &tc.function.arguments);
 
-                        // write_file: full panel with line-numbered preview
+                        // write_file: full panel with syntax-highlighted preview
                         if tc.function.name == "write_file" {
                             let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or_default();
                             if let Some(content) = args["content"].as_str() {
@@ -293,10 +293,13 @@ pub async fn run_turn(
                                 let lines: Vec<&str> = content.lines().collect();
                                 let panel_title = format!("{} ({} lines{})", label, lines.len(), lang);
                                 let show = lines.len().min(8);
-                                let mut panel_lines: Vec<String> = lines[..show]
-                                    .iter()
+                                let highlighted = crate::syntax::highlight_lines(&lines[..show], path);
+                                let mut panel_lines: Vec<String> = highlighted
+                                    .into_iter()
                                     .enumerate()
-                                    .map(|(i, l)| format!("{} {} {}", style(format!("{:>3}", i + 1)).dim(), style("│").dim(), style(truncate(l, 80)).dim()))
+                                    .map(|(i, hl)| {
+                                        format!("{} {} {}", style(format!("{:>3}", i + 1)).dim(), style("│").dim(), hl)
+                                    })
                                     .collect();
                                 if lines.len() > show {
                                     panel_lines.push(format!("    {} {}", style("│").dim(), style(format!("… +{} more lines", lines.len() - show)).dim()));
@@ -306,27 +309,29 @@ pub async fn run_turn(
                                 eprintln!("  {} {}", style("├").cyan(), label);
                             }
 
-                        // edit_file: panel with diff preview
+                        // edit_file: panel with colored diff preview
                         } else if tc.function.name == "edit_file" {
                             let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or_default();
                             let old = args["old_string"].as_str().unwrap_or("");
                             let new = args["new_string"].as_str().unwrap_or("");
+                            let path = args["path"].as_str().unwrap_or("?");
                             if !old.is_empty() || !new.is_empty() {
                                 let max_preview = 6;
-                                let old_lines: Vec<&str> = old.lines().collect();
-                                let new_lines: Vec<&str> = new.lines().collect();
+                                let diff_lines = crate::syntax::format_colored_diff(old, new, path);
+                                let old_line_count = old.lines().count();
+                                let new_line_count = new.lines().count();
                                 let mut panel_lines = Vec::new();
-                                for line in &old_lines[..old_lines.len().min(max_preview)] {
-                                    panel_lines.push(style(format!("- {}", truncate(line, 80))).red().dim().to_string());
+                                for line in diff_lines.iter().take(old_line_count.min(max_preview)) {
+                                    panel_lines.push(line.clone());
                                 }
-                                if old_lines.len() > max_preview {
-                                    panel_lines.push(style(format!("  … +{} more", old_lines.len() - max_preview)).dim().to_string());
+                                if old_line_count > max_preview {
+                                    panel_lines.push(style(format!("  … +{} more removed", old_line_count - max_preview)).dim().to_string());
                                 }
-                                for line in &new_lines[..new_lines.len().min(max_preview)] {
-                                    panel_lines.push(style(format!("+ {}", truncate(line, 80))).green().dim().to_string());
+                                for line in diff_lines.iter().skip(old_line_count).take(max_preview) {
+                                    panel_lines.push(line.clone());
                                 }
-                                if new_lines.len() > max_preview {
-                                    panel_lines.push(style(format!("  … +{} more", new_lines.len() - max_preview)).dim().to_string());
+                                if new_line_count > max_preview {
+                                    panel_lines.push(style(format!("  … +{} more added", new_line_count - max_preview)).dim().to_string());
                                 }
                                 crate::ui::Panel::new().title(label).color(console::Color::Cyan).indent(2).render(&panel_lines);
                             } else {

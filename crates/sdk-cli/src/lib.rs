@@ -11,6 +11,7 @@ pub mod ndjson;
 pub mod plan_commands;
 pub mod session;
 pub mod session_commands;
+pub mod syntax;
 pub mod session_manager;
 pub mod tools;
 pub mod turn;
